@@ -9,7 +9,7 @@ import com.digitalasset.canton.data.Offset
 import com.digitalasset.canton.ledger.api.TransactionShape
 import com.digitalasset.canton.ledger.api.TransactionShape.{AcsDelta, LedgerEffects}
 import com.digitalasset.canton.ledger.participant.state.Update.TopologyTransactionEffective.AuthorizationEvent
-import com.digitalasset.canton.ledger.participant.state.{Reassignment, ReassignmentInfo}
+import com.digitalasset.canton.ledger.participant.state.{Reassignment, ReassignmentInfo, Update}
 import com.digitalasset.canton.platform.store.cache.MutableCacheBackedContractStore.EventSequentialId
 import com.digitalasset.canton.platform.{ContractId, Identifier}
 import com.digitalasset.canton.tracing.{HasTraceContext, TraceContext}
@@ -57,8 +57,8 @@ object TransactionLogUpdate {
     *   The successful submission's completion details.
     * @param recordTime
     *   The time at which the transaction was recorded.
-    * @param externalTransactionHash
-    *   Hash of the transaction (for externall signed transactions only)
+    * @param transactionHash
+    *   Hash of the transaction (for externally signed transactions only)
     */
   final case class TransactionAccepted(
       updateId: String,
@@ -70,7 +70,7 @@ object TransactionLogUpdate {
       completionStreamResponseO: Option[CompletionStreamResponse],
       synchronizerId: String,
       recordTime: Timestamp,
-      externalTransactionHash: Option[CantonHash],
+      transactionHash: Option[CantonHash],
   )(implicit override val traceContext: TraceContext)
       extends TransactionLogUpdate
 
@@ -114,6 +114,14 @@ object TransactionLogUpdate {
       events: Vector[PartyToParticipantAuthorization],
   )(implicit override val traceContext: TraceContext)
       extends TransactionLogUpdate {
+    override def completionStreamResponseO: Option[CompletionStreamResponse] = None
+  }
+
+  final case class ReceivedAcsCommitment(
+      offset: Offset,
+      update: Update.ReceivedAcsCommitment,
+  ) extends TransactionLogUpdate {
+    override def traceContext: TraceContext = update.traceContext
     override def completionStreamResponseO: Option[CompletionStreamResponse] = None
   }
 

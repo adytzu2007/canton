@@ -731,6 +731,8 @@ object BuildCommon {
       `model-based-testing-generators`,
       `model-based-testing-drivers`,
       `model-based-testing-integration-tests`,
+      `traffic-enforcement-api`,
+      `traffic-enforcement-component`,
     )
 
     // Project for utilities that are also used outside of the Canton repo
@@ -1005,7 +1007,6 @@ object BuildCommon {
         DamlProjects.`daml-jwt`,
         DamlProjects.`daml-lf-transaction`,
         DamlProjects.`ledger-api-scala`,
-        DamlProjects.`nonempty-cats`,
         DamlProjects.executors,
         DamlProjects.`rs-grpc-bridge`,
         DamlProjects.`rs-grpc-pekko`,
@@ -1091,7 +1092,6 @@ object BuildCommon {
           google_protobuf_java,
           org_apache_commons_commons_text,
           org_typelevel_paiges_core,
-          scalaz_core,
           scalactic,
           scalatest,
         ),
@@ -1129,7 +1129,6 @@ object BuildCommon {
       .enablePlugins(DamlPlugin)
       .dependsOn(
         DamlProjects.`bindings-java`,
-        DamlProjects.`daml-lf-api-type-signature`,
         DamlProjects.`daml-lf-engine`,
         DamlProjects.`daml-lf-transaction-test-lib` % Test,
         DamlProjects.`testing-utils` % Test,
@@ -1233,7 +1232,9 @@ object BuildCommon {
         DamlProjects.`test-evidence-generator` % "test->test",
         DamlProjects.`test-evidence-tag` % "test->test",
         `community-common` % "test->test",
+        `daml-tls` % "test->test",
         `ledger-json-api` % "compile->compile;test->test",
+        `traffic-enforcement-component`,
       )
       .enablePlugins(DamlPlugin)
       .settings(
@@ -1692,7 +1693,7 @@ object BuildCommon {
     lazy val `magnolify-addon` = project
       .in(file("community/lib/magnolify"))
       .dependsOn(
-        DamlProjects.`nonempty-cats`
+        DamlProjects.`nonempty`
       )
       .settings(
         sharedSettings,
@@ -2006,6 +2007,7 @@ object BuildCommon {
         `community-common` % "compile->compile;test->test",
         `daml-adjustable-clock` % "test->test",
         `ledger-common-dars` % Test,
+        `traffic-enforcement-api`,
       )
       .enablePlugins(DamlPlugin)
       .settings(
@@ -2043,7 +2045,6 @@ object BuildCommon {
       project
         .in(file("community/ledger/ledger-json-api"))
         .dependsOn(
-          DamlProjects.`daml-lf-api-type-signature`,
           DamlProjects.`scalatest-utils` % Test,
           DamlProjects.`timer-utils`,
           `ledger-api-core` % "compile->compile;test->test",
@@ -2577,6 +2578,80 @@ object BuildCommon {
           )
         ),
       )
+
+    lazy val `traffic-enforcement-api` =
+      Project(
+        "traffic-enforcement-api",
+        file("community/traffic-enforcement/api"),
+      )
+        .dependsOn(`util-observability`, `community-base`)
+        .settings(
+          sharedCantonCommunitySettings,
+          enablePublishLibrary,
+          Compile / PB.protoSources := Seq(baseDirectory.value / "protobuf"),
+          Compile / PB.targets := Seq(
+            scalapb.gen(flatPackage = true) -> (Compile / sourceManaged).value / "protobuf"
+          ),
+          Compile / bufLintCheck := (Compile / bufLintCheck)
+            .dependsOn(
+              // these proto files are loaded by buf.work.yaml
+              DamlProjects.`google-common-protos-scala` / PB.unpackDependencies
+            )
+            .value,
+          libraryDependencies ++= Seq(
+            scalapb_runtime,
+            scalapb_runtime_grpc,
+          ),
+          addProtobufFilesToHeaderCheck(Compile),
+        )
+
+    lazy val `traffic-enforcement-component` =
+      Project(
+        "traffic-enforcement-component",
+        file("community/traffic-enforcement/component"),
+      )
+        .dependsOn(
+          `traffic-enforcement-api`,
+          DamlProjects.`ledger-api-scala`,
+          `ledger-api-core`,
+          DamlProjects.`ledger-api-proto`,
+          `util-observability`,
+          CommunityProjects.`community-testing` % Test,
+          CommunityProjects.`community-common` % "compile->compile;test->test",
+        )
+        .enablePlugins(DamlPlugin)
+        .settings(
+          sharedCantonCommunitySettings,
+          Compile / PB.targets := Seq(
+            scalapb.gen(flatPackage = false) -> (Compile / sourceManaged).value / "protobuf"
+          ),
+          Compile / bufLintCheck := (Compile / bufLintCheck)
+            .dependsOn(
+              // these proto files are loaded by buf.work.yaml
+              DamlProjects.`google-common-protos-scala` / PB.unpackDependencies
+            )
+            .value,
+          libraryDependencies ++= Seq(
+            commons_io,
+            pekko_actor_typed,
+            pekko_stream,
+            pekko_projection_core,
+            pekko_projection_jdbc,
+            pekko_projection_slick,
+            pekko_persistence,
+            pekko_persistence_query,
+            // Scope not only to test on purpose as we use the in-memory implementation
+            // in prod code as well
+            pekko_projection_testkit,
+            pekko_slf4j % "compile->compile;test->test",
+            pureconfig_core,
+            pureconfig_generic,
+            scalapb_runtime,
+            scalapb_runtime_grpc,
+            logback_classic % Runtime,
+            scalatest % Test,
+          ),
+        )
   }
 
   object DamlProjects {
@@ -2592,7 +2667,6 @@ object BuildCommon {
       `scalatest-utils`,
       `scala-utils`,
       `nonempty`,
-      `nonempty-cats`,
       `rs-grpc-bridge`,
       `rs-grpc-pekko`,
       `logging-entries`,
@@ -3037,28 +3111,11 @@ object BuildCommon {
       .settings(
         libsScalaSettings,
         libraryDependencies ++= Seq(
+          cats,
           scalacheck % Test,
           scalatest % Test,
           scalatestScalacheck % Test,
-          scalaz_core,
-          scalaz_scalacheck_binding % Test,
           shapeless % Test,
-        ),
-        enablePublishLibrary,
-      )
-
-    lazy val `nonempty-cats` = project
-      .in(file("base/nonempty-cats"))
-      .dependsOn(
-        `nonempty`,
-        `scalatest-utils` % Test,
-      )
-      .settings(
-        libsScalaSettings,
-        libraryDependencies ++= Seq(
-          cats,
-          scalatest % Test,
-          scalaz_core % Test,
         ),
         enablePublishLibrary,
       )
@@ -3244,6 +3301,7 @@ object BuildCommon {
         enablePublishLibrary,
         coverageEnabled := false,
         libraryDependencies ++= Seq(
+          cats,
           google_protobuf_java,
           guava,
         ),
@@ -3281,8 +3339,6 @@ object BuildCommon {
           scalacheck,
           scalatest,
           scalatestScalacheck,
-          scalaz_core,
-          scalaz_scalacheck_binding,
         ),
         addProtobufFilesToHeaderCheck(Compile),
         // TODO(#30144): replace with @nowarn once the bazel targets are deleted
@@ -3314,11 +3370,11 @@ object BuildCommon {
         libraryDependencies ++= Seq(
           google_protobuf_java,
           guava,
+          cats % Test,
+          cats_law % Test,
           scalacheck % Test,
           scalatest % Test,
           scalatestScalacheck % Test,
-          scalaz_core % Test,
-          scalaz_scalacheck_binding % Test,
         ),
         addProtobufFilesToHeaderCheck(Compile),
         // TODO(#30144): replace with @nowarn once the bazel targets are deleted
@@ -3369,9 +3425,7 @@ object BuildCommon {
     lazy val `daml-lf-ide-ledger` = project
       .in(file("community/daml-lf/ide-ledger"))
       .disablePlugins(
-        WartRemover,
-        ScalafixPlugin,
-        ScalafmtPlugin,
+        WartRemover
       )
       .settings(
         sharedCommunitySettings,
@@ -3430,9 +3484,7 @@ object BuildCommon {
     lazy val `daml-lf-transaction` = project
       .in(file("community/daml-lf/transaction"))
       .disablePlugins(
-        WartRemover,
-        ScalafixPlugin,
-        ScalafmtPlugin,
+        WartRemover
       )
       .settings(
         sharedCommunitySettings,
@@ -3454,8 +3506,6 @@ object BuildCommon {
           scala_logging % Test,
           scalatestScalacheck % Test,
           scalatest % Test,
-          scalaz_core % Test,
-          scalaz_scalacheck_binding % Test,
           shapeless % Test,
         ),
         Compile / bufLintCheck := {},
@@ -3464,7 +3514,6 @@ object BuildCommon {
       )
       .dependsOn(
         `crypto`,
-        `daml-lf-api-type-signature` % Test,
         `daml-lf-archive` % Test,
         `daml-lf-data`,
         `daml-lf-language`,
@@ -3485,6 +3534,7 @@ object BuildCommon {
         // javaOnlySettings,
         coverageEnabled := false,
         libraryDependencies ++= Seq(
+          cats,
           google_common_protos,
           google_common_protos % "protobuf",
           google_protobuf_java,
@@ -3492,14 +3542,11 @@ object BuildCommon {
           scala_logging,
           scalatestScalacheck,
           scalatest,
-          scalaz_core,
-          scalaz_scalacheck_binding,
           shapeless,
         ),
       )
       .dependsOn(
         `crypto`,
-        `daml-lf-api-type-signature`,
         `daml-lf-archive`,
         `daml-lf-data` % "compile->test;compile->compile",
         `daml-lf-data-scalacheck`,
@@ -3513,11 +3560,8 @@ object BuildCommon {
     lazy val `daml-lf-transaction-tests` = project
       .in(file("community/daml-lf/transaction-tests"))
       .disablePlugins(
-        WartRemover,
-        ScalafixPlugin,
-        ScalafmtPlugin,
+        WartRemover
       )
-      .enablePlugins(DamlPlugin)
       .settings(
         sharedCommunitySettings,
         scalacOptions := lf_scalaopts_stricter,
@@ -3530,8 +3574,6 @@ object BuildCommon {
           scala_logging % Test,
           scalatestScalacheck % Test,
           scalatest % Test,
-          scalaz_core % Test,
-          scalaz_scalacheck_binding % Test,
           shapeless % Test,
         ),
         // TODO(#30144): replace with @nowarn once the bazel targets are deleted
@@ -3539,15 +3581,11 @@ object BuildCommon {
           "-Wconf:msg=match may not be exhaustive:s",
           "-Wconf:msg=dubious usage of method asInstanceOf with unit value:s",
         ),
-        Test / resourceGenerators += DamlPlugin
-          .testingDarsFromS3("InterfaceTestPackage-v1", "b4414a4478f70a57007caac3d65d0187b68db1e9"),
       )
       .dependsOn(
-        `daml-lf-api-type-signature` % Test,
         `daml-lf-archive` % Test,
         `daml-lf-data` % Test,
         `daml-lf-language`,
-        `daml-lf-parser` % Test,
         `nonempty` % Test,
         `daml-lf-transaction` % Test,
         `daml-lf-transaction-test-lib` % Test,
@@ -3568,6 +3606,7 @@ object BuildCommon {
         enablePublishLibrary,
         coverageEnabled := false,
         libraryDependencies ++= List(
+          cats,
           google_common_protos % "protobuf",
           google_common_protos,
           google_protobuf_java,
@@ -3576,8 +3615,6 @@ object BuildCommon {
           scalatest_flatspec % Test,
           scalatest_shouldmatchers % Test,
           scalatestScalacheck % Test,
-          scalaz_core % Test,
-          scalaz_scalacheck_binding % Test,
         ),
         Compile / bufLintCheck := {},
         Compile / PB.targets := List(PB.gens.java -> (Compile / sourceManaged).value),
@@ -3715,7 +3752,6 @@ object BuildCommon {
         libraryDependencies ++= Seq(
           google_protobuf_java,
           scalatest % Test,
-          scalaz_core,
           scopt,
         ),
         Test / damlJavaCodegen := Seq(
@@ -3740,9 +3776,7 @@ object BuildCommon {
     lazy val `daml-lf-interpreter` = project
       .in(file("community/daml-lf/interpreter"))
       .disablePlugins(
-        WartRemover,
-        ScalafixPlugin,
-        ScalafmtPlugin,
+        WartRemover
       )
       .settings(
         sharedCommunitySettings,
@@ -3755,8 +3789,6 @@ object BuildCommon {
           google_protobuf_java,
           org_apache_commons_commons_text,
           org_typelevel_paiges_core,
-          scalaz_core,
-          scalaz_scalacheck_binding % Test,
           spray_json,
           scalatest % Test,
           scalatest_shouldmatchers % Test,
@@ -3787,7 +3819,6 @@ object BuildCommon {
         ),
       )
       .dependsOn(
-        `daml-lf-api-type-signature`,
         `daml-lf-data`,
         `daml-lf-language`,
         `daml-lf-stable-packages`,
@@ -3831,9 +3862,7 @@ object BuildCommon {
     lazy val `daml-lf-engine` = project
       .in(file("community/daml-lf/engine"))
       .disablePlugins(
-        WartRemover,
-        ScalafixPlugin,
-        ScalafmtPlugin,
+        WartRemover
       )
       .enablePlugins(DamlPlugin)
       .settings(
@@ -3848,7 +3877,6 @@ object BuildCommon {
           google_protobuf_java,
           org_apache_commons_commons_text,
           org_typelevel_paiges_core,
-          scalaz_core,
           scalactic % Test,
           scalameter % Test,
           scalatest % Test,
@@ -3897,7 +3925,6 @@ object BuildCommon {
           google_protobuf_java,
           org_apache_commons_commons_text,
           org_typelevel_paiges_core,
-          scalaz_core,
           scalactic,
           scalatest,
         ),
@@ -3930,6 +3957,7 @@ object BuildCommon {
       .disablePlugins(
         WartRemover
       )
+      .enablePlugins(DamlPlugin)
       .settings(
         sharedCommunitySettings,
         scalacOptions := lf_scalaopts_stricter,
@@ -3944,12 +3972,17 @@ object BuildCommon {
           scala_logging,
           scalaz_core,
           scalaz_scalacheck_binding,
+          scalatest % Test,
         ),
+        Test / resourceGenerators += DamlPlugin
+          .testingDarsFromS3("InterfaceTestPackage-v1", "b4414a4478f70a57007caac3d65d0187b68db1e9"),
       )
       .dependsOn(
         `daml-lf-archive`,
         `daml-lf-data` % "compile->compile;test->test",
+        `daml-lf-parser` % Test,
         `nonempty`,
+        `scalatest-utils` % Test,
       )
 
     lazy val `daml-lf-parser` = project
@@ -3968,8 +4001,6 @@ object BuildCommon {
           google_protobuf_java,
           shapeless,
           scalacheck,
-          scalaz_core,
-          scalaz_scalacheck_binding,
           scala_lang_modules_scala_parser_combinators,
           scalatest % Test,
           scalatestScalacheck % Test,
@@ -4001,7 +4032,6 @@ object BuildCommon {
         coverageEnabled := false,
         libraryDependencies ++= List(
           google_protobuf_java,
-          scalaz_core,
           logback_classic % Runtime,
           scalatest % Test,
         ),
@@ -4033,8 +4063,7 @@ object BuildCommon {
         enablePublishLibrary,
         coverageEnabled := false,
         libraryDependencies ++= List(
-          google_protobuf_java,
-          scalaz_core,
+          google_protobuf_java
         ),
       )
       .dependsOn(

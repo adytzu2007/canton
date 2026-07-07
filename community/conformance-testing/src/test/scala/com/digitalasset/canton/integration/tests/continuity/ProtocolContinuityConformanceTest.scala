@@ -3,7 +3,6 @@
 
 package com.digitalasset.canton.integration.tests.continuity
 
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.HasExecutionContext
 import com.digitalasset.canton.admin.api.client.data.StaticSynchronizerParameters
 import com.digitalasset.canton.config.DbConfig
@@ -33,6 +32,7 @@ import com.digitalasset.canton.util.ReleaseUtils
 import com.digitalasset.canton.util.ReleaseUtils.TestedRelease
 import com.digitalasset.canton.version.ReleaseVersionToProtocolVersions.majorMinorToStableProtocolVersions
 import com.digitalasset.canton.version.{ProtocolVersion, ReleaseVersion}
+import com.digitalasset.nonempty.NonEmpty
 import monocle.macros.syntax.lens.*
 import org.scalatest.concurrent.PatienceConfiguration
 
@@ -190,7 +190,7 @@ trait ProtocolContinuityConformanceTestSynchronizer extends ProtocolContinuityCo
           remoteMediator1.health.wait_for_ready_for_initialization()
         }
 
-        val staticParams = StaticSynchronizerParameters.defaultsWithoutKMS(protocolVersion = pv)
+        val staticParams = StaticSynchronizerParameters.defaults(protocolVersion = pv)
         NetworkBootstrapper(
           Seq(
             NetworkTopologyDescription.createWithStaticSynchronizerParameters(
@@ -264,7 +264,7 @@ trait ProtocolContinuityConformanceTestParticipant extends ProtocolContinuityCon
         mediator1.health.wait_for_ready_for_initialization()
         sequencer1.health.wait_for_ready_for_initialization()
 
-        val staticParams = StaticSynchronizerParameters.defaultsWithoutKMS(protocolVersion = pv)
+        val staticParams = StaticSynchronizerParameters.defaults(protocolVersion = pv)
         NetworkBootstrapper(
           Seq(
             EnvironmentDefinition.S1M1.copy(staticSynchronizerParameters = staticParams)
@@ -346,7 +346,7 @@ trait ProtocolContinuityConformanceTestPing extends ProtocolContinuityConformanc
         mediator1.health.wait_for_ready_for_initialization()
         sequencer1.health.wait_for_ready_for_initialization()
 
-        val staticParams = StaticSynchronizerParameters.defaultsWithoutKMS(protocolVersion = pv)
+        val staticParams = StaticSynchronizerParameters.defaults(protocolVersion = pv)
         NetworkBootstrapper(
           Seq(
             EnvironmentDefinition.S1M1.copy(staticSynchronizerParameters = staticParams)

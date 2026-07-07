@@ -5,14 +5,14 @@ package com.digitalasset.daml.lf
 package crypto
 
 import com.digitalasset.daml.lf.crypto.Hash.NodeHashingError
-import com.digitalasset.daml.lf.crypto.HashUtils.HashTracer
 import com.digitalasset.daml.lf.crypto.Hash.NodeHashingError.IncompleteTransactionTree
+import com.digitalasset.daml.lf.crypto.HashUtils.HashTracer
+import com.digitalasset.daml.lf.data.*
 import com.digitalasset.daml.lf.data.Ref.{ChoiceName, PackageName, Party}
-import com.digitalasset.daml.lf.data._
-import com.digitalasset.daml.lf.transaction._
+import com.digitalasset.daml.lf.transaction.*
 import com.digitalasset.daml.lf.value.Value
 import com.digitalasset.daml.lf.value.Value.ContractId
-import com.digitalasset.daml.lf.value.test.TypedValueGenerators.{ValueAddend => VA}
+import com.digitalasset.daml.lf.value.test.TypedValueGenerators.ValueAddend as VA
 import org.scalatest.Assertion
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
@@ -34,7 +34,7 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
     )
 
   private val globalKey = GlobalKeyWithMaintainers(
-    GlobalKey.assertBuild(
+    GlobalKey(
       defRef("module_key", "name"),
       PackageName.assertFromString("package_name_key"),
       VA.text.inj("hello"),
@@ -44,7 +44,7 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
   )
 
   private val globalKey2 = GlobalKeyWithMaintainers(
-    GlobalKey.assertBuild(
+    GlobalKey(
       defRef("module_key", "name"),
       PackageName.assertFromString("package_name_key"),
       VA.text.inj("bye"),
@@ -195,13 +195,12 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
 
   private val exerciseNodeHash = "5b9af41fe9032a70a772063301907c823e933d2df5bae2b48293f33cf3992611"
 
-  private val lookupNode = Node.LookupByKey(
+  private val lookupNode = Node.QueryByKey(
     packageName = packageName0,
     templateId = defRef("module", "name"),
+    exhaustive = false,
     key = globalKey,
-    result = Some(
-      ContractId.V1.assertFromString(contractId1)
-    ),
+    result = Vector(ContractId.V1.assertFromString(contractId1)),
     version = SerializationVersion.V1,
   )
 
@@ -302,9 +301,8 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
       .fromString(createNodeHash)
       .getOrElse(fail("Invalid hash"))
 
-    def hashCreateNode(node: Node.Create, hashTracer: HashTracer = HashTracer.NoOp) = {
+    def hashCreateNode(node: Node.Create, hashTracer: HashTracer = HashTracer.NoOp) =
       hashNodeV1(node, Some(nodeSeedCreate), hashTracer = hashTracer)
-    }
 
     "be stable" in {
       hashCreateNode(createNode) shouldBe defaultHash
@@ -369,16 +367,14 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
     }
 
     "explain encoding" in {
-      {
-        val hashTracer = HashTracer.StringHashTracer()
-        val hash = hashCreateNode(createNode, hashTracer = hashTracer)
-        hash shouldBe defaultHash
-        hashTracer.result shouldBe s"""'00' # 00 (Value Encoding Version)
+      val hashTracer = HashTracer.StringHashTracer()
+      val hash = hashCreateNode(createNode, hashTracer = hashTracer)
+      hash shouldBe defaultHash
+      hashTracer.result shouldBe s"""'00' # 00 (Value Encoding Version)
                              |'07' # 07 (Value Encoding Purpose)
                              |$createNodeEncoding
                              |""".stripMargin
-        assertStringTracer(hashTracer, hash)
-      }
+      assertStringTracer(hashTracer, hash)
     }
   }
 
@@ -387,9 +383,8 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
       .fromString(fetchNodeHash)
       .getOrElse(fail("Invalid hash"))
 
-    def hashFetchNode(node: Node.Fetch, hashTracer: HashTracer = HashTracer.NoOp) = {
+    def hashFetchNode(node: Node.Fetch, hashTracer: HashTracer = HashTracer.NoOp) =
       hashNodeV1(node, nodeSeed = Some(nodeSeedFetch), hashTracer = hashTracer)
-    }
 
     "be stable" in {
       hashFetchNode(fetchNode) shouldBe defaultHash
@@ -479,14 +474,13 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
         node: Node.Exercise,
         subNodes: Map[NodeId, Node] = subNodesMap,
         hashTracer: HashTracer = HashTracer.NoOp,
-    ) = {
+    ) =
       hashNodeV1(
         node,
         nodeSeed = Some(nodeSeedExercise),
         subNodes = subNodes,
         hashTracer = hashTracer,
       )
-    }
 
     "be stable" in {
       hashExerciseNode(exerciseNode) shouldBe defaultHash
@@ -722,7 +716,7 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
         node: Node.Rollback,
         subNodes: Map[NodeId, Node] = subNodesMap,
         hashTracer: HashTracer = HashTracer.NoOp,
-    ) = {
+    ) =
       Hash.hashNodeV1(
         node,
         nodeSeed = Some(nodeSeedRollback),
@@ -730,7 +724,6 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
         subNodes = subNodes,
         hashTracer = hashTracer,
       )
-    }
 
     "be stable" in {
       hashRollbackNode(rollbackNode) shouldBe defaultHash
@@ -762,11 +755,10 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
     }
 
     "explain encoding" in {
-      {
-        val hashTracer = HashTracer.StringHashTracer()
-        val hash = hashRollbackNode(rollbackNode, hashTracer = hashTracer)
-        hash shouldBe defaultHash
-        hashTracer.result shouldBe s"""'00' # 00 (Value Encoding Version)
+      val hashTracer = HashTracer.StringHashTracer()
+      val hash = hashRollbackNode(rollbackNode, hashTracer = hashTracer)
+      hash shouldBe defaultHash
+      hashTracer.result shouldBe s"""'00' # 00 (Value Encoding Version)
                                       |'07' # 07 (Value Encoding Purpose)
                                       |'01' # 01 (Node Encoding Version)
                                       |# Rollback Node
@@ -777,28 +769,24 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
                                       |'$exerciseNodeHash' # (Hashed Inner Node)
                                       |""".stripMargin
 
-        assertStringTracer(hashTracer, hash)
-      }
+      assertStringTracer(hashTracer, hash)
     }
   }
 
   "ValueBuilder" should {
     def withValueBuilder(f: (Hash.ValueHashBuilder, HashTracer.StringHashTracer) => Assertion) = {
-      {
-        val hashTracer = HashTracer.StringHashTracer()
-        val builder = Hash.valueBuilderForV1Node(hashTracer)
-        f(builder, hashTracer)
-      }
+      val hashTracer = HashTracer.StringHashTracer()
+      val builder = Hash.valueBuilderForV1Node(hashTracer)
+      f(builder, hashTracer)
     }
 
-    def assertEncode(value: Value, expectedHash: String, expectedDebugEncoding: String) = {
+    def assertEncode(value: Value, expectedHash: String, expectedDebugEncoding: String) =
       withValueBuilder { case (builder, hashTracer) =>
         val hash = builder.addTypedValue(value).build
         hash.toHexString shouldBe expectedHash
         hashTracer.result shouldBe expectedDebugEncoding
         assertStringTracer(hashTracer, hash)
       }
-    }
 
     "encode unit value" in {
       assertEncode(
@@ -1079,14 +1067,13 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
     }
 
     "explain encoding" in {
-      {
-        val hashTracer = HashTracer.StringHashTracer()
-        val hash = Hash.hashTransactionV1(
-          transaction,
-          defaultNodeSeedsMap,
-          hashTracer = hashTracer,
-        )
-        hashTracer.result shouldBe s"""# Serialization Version
+      val hashTracer = HashTracer.StringHashTracer()
+      val hash = Hash.hashTransactionV1(
+        transaction,
+        defaultNodeSeedsMap,
+        hashTracer = hashTracer,
+      )
+      hashTracer.result shouldBe s"""# Serialization Version
                                       |'00000003' # 3 (int)
                                       |'322e31' # 2.1 (string)
                                       |# Root Nodes
@@ -1094,8 +1081,7 @@ class NodeHashV1Spec extends AnyWordSpec with Matchers with HashUtils {
                                       |'$createNodeHash' # (Hashed Inner Node)
                                       |'$rollbackNodeHash' # (Hashed Inner Node)
                                       |""".stripMargin
-        assertStringTracer(hashTracer, hash)
-      }
+      assertStringTracer(hashTracer, hash)
     }
   }
 }

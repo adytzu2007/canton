@@ -20,7 +20,6 @@ import com.digitalasset.canton.logging.{ErrorLoggingContext, NamedLoggerFactory,
 import com.digitalasset.canton.participant.protocol.submission.NextGenTransactionTreeFactory.*
 import com.digitalasset.canton.participant.protocol.submission.TransactionTreeFactory.*
 import com.digitalasset.canton.protocol.*
-import com.digitalasset.canton.protocol.RollbackContext.RollbackScope
 import com.digitalasset.canton.protocol.WellFormedTransaction.{
   WithAbsoluteSuffixes,
   WithoutSuffixes,
@@ -33,7 +32,6 @@ import com.digitalasset.canton.util.PackageConsumer.PackageResolver
 import com.digitalasset.canton.util.collection.MapsUtil
 import com.digitalasset.canton.util.{ContractHasher, ErrorUtil, LfTransactionUtil, MonadUtil}
 import com.digitalasset.canton.version.ProtocolVersion
-import com.digitalasset.daml.lf.data.ImmArray
 import com.digitalasset.daml.lf.data.Ref.PackageId
 import com.digitalasset.daml.lf.transaction.CreationTime
 import io.scalaland.chimney.dsl.*
@@ -59,6 +57,7 @@ class NextGenTransactionTreeFactory(
   private val contractIdSuffixer: ContractIdSuffixer =
     new ContractIdSuffixer(cryptoOps, cantonContractIdVersion)
   private val transactionViewDecompositionFactory = TransactionViewDecompositionFactory
+  private val rollbackContextFactory = RollbackContextFactory(protocolVersion)
 
   override def createTransactionTree(
       transaction: WellFormedTransaction[WithoutSuffixes],
@@ -100,8 +99,9 @@ class NextGenTransactionTreeFactory(
       transactionViewDecompositionFactory.fromTransaction(
         topologySnapshot,
         transaction,
-        RollbackContext.empty,
+        rollbackContextFactory.empty,
         Some(participantId.adminParty.toLf),
+        rollbackContextFactory,
       )
 
     val commonMetadata = CommonMetadata
@@ -333,10 +333,9 @@ class NextGenTransactionTreeFactory(
       case _ => false
     }
     val subviewIndex = TransactionSubviews.indices(nbSubViews).iterator
-    def viewExternalCallResultsFromCollected()
-        : ImmArray[ViewParticipantData.ViewExternalCallResult] =
-      if (collectExternalCallResults) ImmArray.from(externalCallResultsBuilder.result())
-      else ImmArray.Empty
+    def viewExternalCallResultsFromCollected(): Seq[ViewParticipantData.ViewExternalCallResult] =
+      if (collectExternalCallResults) externalCallResultsBuilder.result()
+      else Seq.empty
 
     for {
       // Compute salts
@@ -638,12 +637,12 @@ class NextGenTransactionTreeFactory(
       coreOtherNodes: List[(LfActionNode, RollbackScope)],
       childViews: Seq[TransactionView],
       createdContractInfo: collection.Map[LfContractId, NewContractInstance],
-      resolvedKeys: Map[LfGlobalKey, LfVersioned[KeyResolutionWithMaintainers]],
+      keyResolution: Map[LfGlobalKey, LfVersioned[KeyResolutionWithMaintainers]],
       actionDescription: ActionDescription,
       salt: Salt,
       contractOfId: ContractInstanceOfId,
       rbContextCore: RollbackContext,
-      externalCallResults: ImmArray[ViewParticipantData.ViewExternalCallResult],
+      externalCallResults: Seq[ViewParticipantData.ViewExternalCallResult],
   ): EitherT[FutureUnlessShutdown, TransactionTreeConversionError, ViewParticipantData] = {
 
     val consumedInCore =
@@ -702,12 +701,12 @@ class NextGenTransactionTreeFactory(
             coreInputs = coreInputsWithInstances,
             createdCore = created,
             createdInSubviewArchivedInCore = createdInSubviewArchivedInCore,
-            resolvedKeys = resolvedKeys,
+            keyResolution = keyResolution,
             actionDescription = actionDescription,
             rollbackContext = rbContextCore,
             salt = salt,
-            protocolVersion = protocolVersion,
             externalCallResults = externalCallResults,
+            protocolVersion = protocolVersion,
           )
         )
         .leftMap[TransactionTreeConversionError](ViewParticipantDataError.apply)
@@ -757,6 +756,7 @@ class NextGenTransactionTreeFactory(
         transaction,
         rbContext,
         submittingParticipantO.map(_.adminParty.toLf),
+        rollbackContextFactory,
       )
 
     val rolledBackEffect = rbContext.inRollback && transactionEffectful(transaction.unwrap)
@@ -765,7 +765,7 @@ class NextGenTransactionTreeFactory(
       _ <- EitherT.cond[FutureUnlessShutdown](
         !rolledBackEffect,
         (),
-        RolledBackEffect(rbContext, rootPosition),
+        RolledBackEffect(rootPosition),
       )
       decompositions <- EitherT.right(decompositionsF)
       decomposition = checked(decompositions.head)
@@ -805,7 +805,12 @@ class NextGenTransactionTreeFactory(
         .leftMap(ContractIdAbsolutizationError(_): TransactionTreeConversionError)
     } yield {
       view -> checked(
-        WellFormedTransaction.checkOrThrow(absolutizedTx, metadata, WithAbsoluteSuffixes)
+        WellFormedTransaction.checkOrThrow(
+          absolutizedTx,
+          metadata,
+          WithAbsoluteSuffixes,
+          rollbackContextFactory,
+        )
       )
     }
   }

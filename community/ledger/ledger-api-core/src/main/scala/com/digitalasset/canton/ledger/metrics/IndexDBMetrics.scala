@@ -178,6 +178,15 @@ trait UpdateStreamsDbMetrics {
 
   val topologyTransactionsStream: TopologyTransactionsStreamMetrics =
     new TopologyTransactionsStreamMetrics
+
+  // Private constructor to avoid being instantiated multiple times by accident
+  final class AcsCommitmentsStreamMetrics private[UpdateStreamsDbMetrics] {
+    val fetchAcsCommitments: DatabaseMetrics =
+      createDbMetrics("fetch_acs_commitments")
+  }
+
+  val acsCommitmentsStream: AcsCommitmentsStreamMetrics =
+    new AcsCommitmentsStreamMetrics
 }
 
 trait UpdatePointwiseDbMetrics {
@@ -429,7 +438,6 @@ class MainIndexDBMetrics(
   val getCompletions: DatabaseMetrics = createDbMetrics("get_completions")
   val getParticipantId: DatabaseMetrics = createDbMetrics("get_participant_id")
   val getLedgerEnd: DatabaseMetrics = createDbMetrics("get_ledger_end")
-  val getCleanSynchronizerIndex: DatabaseMetrics = createDbMetrics("get_clean_synchronizer_index")
   val getTopologyEventOffsetPublishedOnRecordTime: DatabaseMetrics = createDbMetrics(
     "get_topology_event_offset_published_on_record_time"
   )
@@ -465,6 +473,10 @@ class MainIndexDBMetrics(
   )
   val lookupLastActivationsDbMetrics: DatabaseMetrics = createDbMetrics(
     "lookup_last_activations"
+  )
+
+  val archiveDeactivations: DatabaseMetrics = createDbMetrics(
+    "archive_deactivations"
   )
 
   val lookupPointwiseUpdateFetchEventIds: DatabaseMetrics = createDbMetrics(

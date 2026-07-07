@@ -10,7 +10,6 @@ import cats.syntax.functor.*
 import cats.syntax.functorFilter.*
 import cats.syntax.parallel.*
 import cats.{Foldable, Monoid}
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.concurrent.FutureSupervisor
 import com.digitalasset.canton.config.RequireTypes.NonNegativeLong
 import com.digitalasset.canton.data.ViewType.{
@@ -65,6 +64,7 @@ import com.digitalasset.canton.tracing.{TraceContext, Traced}
 import com.digitalasset.canton.util.ShowUtil.*
 import com.digitalasset.canton.util.{Checked, ErrorUtil, OptionUtil}
 import com.digitalasset.canton.{RequestCounter, SequencerCounter}
+import com.digitalasset.nonempty.NonEmpty
 import com.google.common.annotations.VisibleForTesting
 import com.google.rpc.status.Status
 import io.opentelemetry.api.trace.Tracer
@@ -116,7 +116,8 @@ trait MessageDispatcher { this: NamedLogging =>
       sc: SequencerCounter,
       ts: CantonTimestamp,
   )(implicit traceContext: TraceContext): ProcessingResult = {
-    val acsCommitments = envelopes.mapFilter(select[SignedProtocolMessage[messages.AcsCommitment]])
+    val acsCommitments =
+      envelopes.mapFilter(select[SignedProtocolMessage[messages.LegacyAcsCommitment]])
     if (acsCommitments.nonEmpty) {
       // When a participant receives an ACS commitment from a counter-participant, the counter-participant
       // expects to receive the corresponding commitment from the local participant.
@@ -716,7 +717,7 @@ trait MessageDispatcher { this: NamedLogging =>
           }
         case (_, SignedProtocolMessage(typedMessage, _)) =>
           typedMessage.content match {
-            case messages.AcsCommitment(_, sender, _, period, _) =>
+            case messages.LegacyAcsCommitment(_, sender, _, period, _) =>
               s"commitment=$sender for ts=${period.toInclusive}"
             case ConfirmationResultMessage(_, viewType, requestId, _, verdict) =>
               s"verdict=$requestId, type=$viewType, is=$verdict"

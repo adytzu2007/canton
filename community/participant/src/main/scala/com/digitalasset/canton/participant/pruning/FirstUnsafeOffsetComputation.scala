@@ -10,7 +10,6 @@ import cats.syntax.foldable.*
 import cats.syntax.parallel.*
 import cats.syntax.traverse.*
 import cats.syntax.traverseFilter.*
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.config.ProcessingTimeout
 import com.digitalasset.canton.data.{CantonTimestamp, Offset}
 import com.digitalasset.canton.ledger.participant.state.SynchronizerIndex
@@ -37,6 +36,7 @@ import com.digitalasset.canton.topology.SynchronizerId
 import com.digitalasset.canton.tracing.TraceContext
 import com.digitalasset.canton.util.MonadUtil
 import com.digitalasset.canton.util.ShowUtil.*
+import com.digitalasset.nonempty.NonEmpty
 
 import scala.concurrent.ExecutionContext
 import scala.math.Ordering.Implicits.*
@@ -190,6 +190,7 @@ class FirstUnsafeOffsetComputation(
       }
 
       // Other checks
+      // TODO(#33650) – replace with unboundedTraverseFilter; safe because logicalPersistentStates are realistically bounded low-digit
       unsafeIncompleteReassignmentOffsets <- logicalPersistentStates.values.toSeq.parTraverseFilter(
         FirstUnsafeOffsetComputation.firstUnsafeReassignmentEventFor(
           _,
@@ -236,6 +237,7 @@ class FirstUnsafeOffsetComputation(
   ]] =
     for {
       pruningCandidatePersistentStates <- EitherT
+        // TODO(#33650) – replace with unboundedFilterA; safe because lsids are realistically bounded low-digit
         .right[LedgerPruningError](lsids.parFilterA { lsid =>
           participantNodePersistentState.value.ledgerApiStore
             .lastSynchronizerOffsetBeforeOrAt(lsid, pruneUptoInclusive)
@@ -246,15 +248,13 @@ class FirstUnsafeOffsetComputation(
         (),
         LedgerPruningNothingToPrune: LedgerPruningError,
       )
-      res <- EitherT
-        .right(
-          MonadUtil
-            .sequentialTraverse(lsids)(lsid =>
-              participantNodePersistentState.value.ledgerApiStore
+      res = lsids.map(
+        (
+            lsid =>
+              lsid -> participantNodePersistentState.value.ledgerApiStore
                 .cleanSynchronizerIndex(lsid)
-                .map(lsid -> _)
-            )
         )
+      )
     } yield res.toMap
 
   // Make sure that we do not prune an offset whose publication time has not been elapsed since the max deduplication duration.

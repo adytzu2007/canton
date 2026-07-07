@@ -11,7 +11,6 @@ import cats.syntax.functorFilter.*
 import cats.syntax.traverse.*
 import com.daml.metrics.api.MetricsContext
 import com.daml.nameof.NameOf.functionFullName
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.concurrent.FutureSupervisor
 import com.digitalasset.canton.config.RequireTypes.NonNegativeLong
 import com.digitalasset.canton.config.TestingConfigInternal
@@ -76,10 +75,12 @@ import com.digitalasset.canton.util.EitherUtil.RichEither
 import com.digitalasset.canton.util.Thereafter.syntax.ThereafterOps
 import com.digitalasset.canton.version.ProtocolVersion
 import com.digitalasset.canton.{LfPartyId, RequestCounter, SequencerCounter, checked}
+import com.digitalasset.nonempty.NonEmpty
 import com.google.common.annotations.VisibleForTesting
 
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import scala.annotation.unused
 import scala.concurrent.ExecutionContext
 import scala.util.{Failure, Success}
 
@@ -173,6 +174,11 @@ abstract class ProtocolProcessor[
 
     val recentSnapshot = crypto.create(topologySnapshot)
     val explicitMediatorGroupIndex = steps.explicitMediatorGroup(submissionParam)
+
+    logger.debug(
+      s"Topology snapshot timestamp at submission: ${recentSnapshot.ipsSnapshot.timestamp}"
+    )
+
     for {
       _ <- steps.validateSubmittersNotOnboarding(submissionParam, topologySnapshot, participantId)
 
@@ -187,9 +193,7 @@ abstract class ProtocolProcessor[
       )
       (submission, pendingSubmission) =
         submissionData
-      _ = logger.debug(
-        s"Topology snapshot timestamp at submission: ${recentSnapshot.ipsSnapshot.timestamp}"
-      )
+
       result <- {
         submission match {
           case untracked: steps.UntrackedSubmission =>
@@ -448,6 +452,16 @@ abstract class ProtocolProcessor[
 
   protected def metricsContextForSubmissionParam(submissionParam: SubmissionParam): MetricsContext
 
+  @unused("default implementation")
+  protected def validateLocalTrafficCost(
+      submissionParam: SubmissionParam
+  )(
+      trafficCost: Long,
+      traceContext: TraceContext,
+  ): FutureUnlessShutdown[Unit] =
+    // TODO(#33681): Remove default implementation
+    FutureUnlessShutdown.unit
+
   /** Submit the batch to the sequencer. Also registers `submissionParam` as pending submission.
     */
   private def submitInternal(
@@ -497,6 +511,8 @@ abstract class ProtocolProcessor[
             maxSequencingTime = maxSequencingTime,
           ),
           messageId = messageId,
+          trafficCostValidator = (trafficCost: Long, traceContext: TraceContext) =>
+            validateLocalTrafficCost(submissionParam)(trafficCost, traceContext),
           amplify = true,
           callback = res => sendResultP.trySuccess(res).discard,
         )

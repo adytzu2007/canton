@@ -9,7 +9,7 @@ import scala.annotation.nowarn
 object Util {
 
   import value.Value
-  import value.Value._
+  import value.Value.*
 
   // Equivalent to serialization + unserialization.
   // Fails if :
@@ -71,7 +71,7 @@ object Util {
   ): Either[String, GlobalKeyWithMaintainers] =
     normalizeValue(key.globalKey.key, version).map(normalized =>
       key.copy(globalKey =
-        GlobalKey.assertBuild(
+        GlobalKey(
           key.globalKey.templateId,
           key.globalKey.packageName,
           normalized,

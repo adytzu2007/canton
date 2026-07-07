@@ -5,7 +5,6 @@ package com.digitalasset.canton.sequencing.client.pool
 
 import com.daml.grpc.adapter.ExecutionSequencerFactory
 import com.daml.metrics.api.MetricsContext
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.concurrent.FutureSupervisor
 import com.digitalasset.canton.config.ProcessingTimeout
 import com.digitalasset.canton.config.RequireTypes.{NonNegativeInt, Port, PositiveInt}
@@ -71,6 +70,7 @@ import com.digitalasset.canton.version.{
   ReleaseVersion,
 }
 import com.digitalasset.canton.{BaseTest, HasExecutionContext, SequencerAlias}
+import com.digitalasset.nonempty.NonEmpty
 import io.grpc.stub.StreamObserver
 import io.grpc.{CallOptions, Channel, Status}
 import org.apache.pekko.actor.ActorSystem
@@ -225,6 +225,7 @@ trait ConnectionPoolTestHelpers {
       poolDelays: SequencerConnectionPoolDelays = SequencerConnectionPoolDelays.default,
       blockValidation: Int => Boolean = _ => false,
       metrics: SequencerConnectionPoolMetrics = CommonMockMetrics.sequencerClient.connectionPool,
+      metricsContext: MetricsContext = MetricsContext.Empty,
       namePrefix: String = "test",
   )(
       f: (
@@ -254,6 +255,7 @@ trait ConnectionPoolTestHelpers {
       testCrypto.crypto,
       Some(seedForRandomness),
       metrics = metrics,
+      metricsContext = metricsContext,
       futureSupervisor,
       testTimeouts,
       loggerFactory,
@@ -291,7 +293,7 @@ trait ConnectionPoolTestHelpers {
       sequencerSubscriptionFactory = new TestSequencerSubscriptionFactory(timeouts, loggerFactory),
       subscriptionHandlerFactory = TestSubscriptionHandlerFactory,
       metrics = CommonMockMetrics.sequencerClient.connectionPool,
-      metricsContext = MetricsContext.Empty,
+      metricsContext = connectionPool.metricsContext,
       timeouts = timeouts,
       loggerFactory = loggerFactory,
     )
@@ -397,6 +399,7 @@ protected object ConnectionPoolTestHelpers {
 
   private lazy val clientProtocolVersions: NonEmpty[List[ProtocolVersion]] =
     ProtocolVersionCompatibility.supportedProtocols(
+      includeDevVersion = true,
       includeAlphaVersions = true,
       includeBetaVersions = true,
       release = ReleaseVersion.current,
@@ -470,6 +473,7 @@ protected object ConnectionPoolTestHelpers {
       crypto: Crypto,
       seedForRandomnessO: Option[Long],
       metrics: SequencerConnectionPoolMetrics,
+      metricsContext: MetricsContext,
       futureSupervisor: FutureSupervisor,
       timeouts: ProcessingTimeout,
       loggerFactory: NamedLoggerFactory,
@@ -482,6 +486,7 @@ protected object ConnectionPoolTestHelpers {
       responsesForConnection,
       validationBlocker,
       metrics,
+      metricsContext,
       futureSupervisor,
       timeouts,
       loggerFactory,
@@ -509,7 +514,7 @@ protected object ConnectionPoolTestHelpers {
           crypto,
           seedForRandomnessO,
           metrics,
-          MetricsContext.Empty,
+          metricsContext,
           futureSupervisor,
           timeouts,
           loggerFactory,
@@ -534,6 +539,7 @@ protected object ConnectionPoolTestHelpers {
       responsesForConnection: PartialFunction[Int, TestResponses],
       validationBlocker: TestValidationBlocker,
       metrics: SequencerConnectionPoolMetrics,
+      metricsContext: MetricsContext,
       futureSupervisor: FutureSupervisor,
       timeouts: ProcessingTimeout,
       loggerFactory: NamedLoggerFactory,
@@ -579,7 +585,7 @@ protected object ConnectionPoolTestHelpers {
         ClientChannelParams.ForTesting,
         stubFactory = stubFactory,
         metrics = metrics,
-        metricsContext = MetricsContext.Empty,
+        metricsContext = metricsContext,
         futureSupervisor = futureSupervisor,
         timeouts = timeouts,
         loggerFactory = loggerFactory.append("connection", config.name),

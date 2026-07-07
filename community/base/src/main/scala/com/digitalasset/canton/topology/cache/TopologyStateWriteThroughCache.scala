@@ -9,7 +9,6 @@ import cats.syntax.parallel.*
 import com.daml.metrics.CacheMetrics
 import com.daml.metrics.api.MetricsContext
 import com.daml.metrics.api.noop.NoOpMetricsFactory
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.concurrent.FutureSupervisor
 import com.digitalasset.canton.config.CantonRequireTypes.String185
 import com.digitalasset.canton.config.RequireTypes.PositiveInt
@@ -66,6 +65,7 @@ import com.digitalasset.canton.topology.{Namespace, PhysicalSynchronizerId, Uniq
 import com.digitalasset.canton.tracing.{TraceContext, Traced}
 import com.digitalasset.canton.util.Thereafter.syntax.ThereafterAsyncOps
 import com.digitalasset.canton.util.{BatchAggregator, ErrorUtil, FutureUtil, MonadUtil, Mutex}
+import com.digitalasset.nonempty.NonEmpty
 import com.google.common.annotations.VisibleForTesting
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
@@ -922,6 +922,7 @@ class TopologyStateWriteThroughCache(
       .map(StateKey(_, uid))
       // this is safe as transaction types is an enum with a few elements
       // plus we batch within the batch aggregator
+      // TODO(#33650) – Safe because transaction types is an enum with a few elements
       .parFlatTraverse(
         get(_, asOf.value, warnIfUncached).map(_.currentState.filterState(asOf, asOfInclusive, op))
       )
@@ -954,6 +955,7 @@ class TopologyStateWriteThroughCache(
   ): FutureUnlessShutdown[Seq[GenericStoredTopologyTransaction]] =
     transactionTypes.toSeq
       .map(StateKey(_, ns, None))
+      // TODO(#33650) – Safe as transaction types is an enum with a few elements
       .parFlatTraverse(
         get(_, asOf.value, warnIfUncached)
           .map(_.currentState.filterState(asOf, asOfInclusive, Some(op)))

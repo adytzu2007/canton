@@ -9,7 +9,6 @@ import cats.syntax.functor.*
 import cats.syntax.option.*
 import cats.syntax.parallel.*
 import com.daml.metrics.api.MetricsContext
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.concurrent.FutureSupervisor
 import com.digitalasset.canton.config.RequireTypes.NonNegativeLong
 import com.digitalasset.canton.crypto.*
@@ -106,6 +105,7 @@ import com.digitalasset.canton.{
   checked,
 }
 import com.digitalasset.daml.lf.transaction.CreationTime
+import com.digitalasset.nonempty.NonEmpty
 import monocle.PLens
 
 import scala.collection.immutable.SortedMap
@@ -368,6 +368,7 @@ class TransactionProcessingSteps(
         completionInfo,
         TransactionSubmissionTrackingData.CauseWithTemplate(error),
         psid,
+        transactionHash = submitterInfo.transactionHash,
       )
 
     override def submissionId: Option[LedgerSubmissionId] = submitterInfo.submissionId
@@ -455,6 +456,7 @@ class TransactionProcessingSteps(
           // At this stage we're still preparing the batch to be sent,
           // so no traffic cost has been charged
           submitterInfoWithDedupPeriod.toCompletionInfo(paidTrafficCost = NonNegativeLong.zero),
+          transactionHash = submitterInfo.transactionHash,
         ): PreparedBatch
       }
 
@@ -467,6 +469,7 @@ class TransactionProcessingSteps(
           submitterInfoWithDedupPeriod.toCompletionInfo(paidTrafficCost = NonNegativeLong.zero),
           rejectionCause,
           psid,
+          transactionHash = submitterInfo.transactionHash,
         )
         Success(Outcome(Left(trackingData)))
       }
@@ -499,6 +502,7 @@ class TransactionProcessingSteps(
         submitterInfo.toCompletionInfo(NonNegativeLong.zero).copy(optDeduplicationPeriod = None),
         TransactionSubmissionTrackingData.TimeoutCause,
         psid,
+        transactionHash = submitterInfo.transactionHash,
       )
 
     override def embedInFlightSubmissionTrackerError(
@@ -550,6 +554,7 @@ class TransactionProcessingSteps(
       override val batch: Batch[DefaultOpenEnvelope],
       override val rootHash: RootHash,
       completionInfo: CompletionInfo,
+      transactionHash: Option[Hash],
   ) extends PreparedBatch {
     override def pendingSubmissionId: Unit = ()
 
@@ -576,6 +581,7 @@ class TransactionProcessingSteps(
         completionInfo,
         rejectionCause,
         psid,
+        transactionHash = transactionHash,
       )
     }
 
@@ -873,7 +879,6 @@ class TransactionProcessingSteps(
             commonData,
             getEngineAbortStatus = () => engineController.abortStatus,
             reInterpretedTopLevelViews,
-            protocolVersion,
           )
 
         internalConsistencyResultET = EitherT(
@@ -883,7 +888,7 @@ class TransactionProcessingSteps(
                 internalConsistencyChecker
                   .check(
                     parsedRequest.rootViewTrees,
-                    mcResult.unmergedTransactionsWithoutToplevelRollbackNodes,
+                    mcResult.unmergedTransactionsWithoutTopLevelRollbackNodes,
                     topologySnapshot = ipsSnapshot,
                   )
                   .value
@@ -1061,15 +1066,28 @@ class TransactionProcessingSteps(
       traceContext: TraceContext
   ): (Option[SequencedEventUpdate], Option[PendingSubmissionId]) = {
     val rejection = Update.CommandRejected.FinalReason(error.rpcStatus())
-    completionInfoFromSubmitterMetadataO(submitterMetadata, freshOwnTimelyTx, trafficCost).map {
-      completionInfo =>
-        Update.SequencedCommandRejected(
-          completionInfo,
-          rejection,
-          psid.logical,
-          ts,
-          isTransaction = true,
-        )
+    completionInfoFromSubmitterMetadataO(
+      submitterMetadata,
+      freshOwnTimelyTx,
+      trafficCost,
+    ).map { completionInfo =>
+      Update.SequencedCommandRejected(
+        completionInfo,
+        rejection,
+        psid.logical,
+        ts,
+        isTransaction = true,
+        // We do not carry the transaction hash for these early sequenced rejections. The hash is
+        // recomputed during phase-3 reinterpretation, but this rejection fires before that point
+        // (e.g. inactive mediator, or no view with valid recipients after a topology change between
+        // prepare and submission), and the in-flight submission's tracking data (which held the
+        // phase-1 hash) has already been dropped once sequencing was observed. Lookup-by-hash is
+        // therefore best-effort for these rare cases; carrying the phase-1 hash end to end is
+        // deferred follow-up work.
+        // TODO(#31816): decide whether to move hash computations earlier, or store
+        // the phase-1 hash to be used for these rejections.
+        transactionHash = None,
+      )
     } -> None // Transaction processing doesn't use pending submissions
   }
 
@@ -1101,7 +1119,13 @@ class TransactionProcessingSteps(
     ) = pendingTransaction
     val submitterMetaO = transactionValidationResult.submitterMetadataO
     val completionInfoO =
-      submitterMetaO.flatMap(completionInfoFromSubmitterMetadataO(_, freshOwnTimelyTx, trafficCost))
+      submitterMetaO.flatMap(
+        completionInfoFromSubmitterMetadataO(
+          _,
+          freshOwnTimelyTx,
+          trafficCost,
+        )
+      )
 
     errorDetails.logRejection(
       Map("requestId" -> pendingTransaction.requestId.toString)
@@ -1115,6 +1139,7 @@ class TransactionProcessingSteps(
         psid.logical,
         requestTime,
         isTransaction = true,
+        transactionHash = transactionValidationResult.validatedExternalTransactionHash,
       )
     )
     Right(updateO)
@@ -1198,7 +1223,7 @@ class TransactionProcessingSteps(
       witnessed = txValidationResult.witnessed,
       completionInfoO = completionInfoO,
       lfTx = modelConformanceResult.suffixedTransaction,
-      externalTransactionHash =
+      transactionHash =
         pendingRequestData.transactionValidationResult.validatedExternalTransactionHash,
     )
   }
@@ -1214,7 +1239,7 @@ class TransactionProcessingSteps(
       witnessed: Map[LfContractId, GenContractInstance],
       completionInfoO: Option[CompletionInfo],
       lfTx: WellFormedTransaction[WithSuffixesAndMerged],
-      externalTransactionHash: Option[Hash],
+      transactionHash: Option[Hash],
   )(implicit
       traceContext: TraceContext
   ): CommitAndStoreContractsAndPublishEvent = {
@@ -1253,7 +1278,7 @@ class TransactionProcessingSteps(
             updateId = updateId,
             synchronizerId = psid.logical,
             recordTime = requestTime,
-            externalTransactionHash = externalTransactionHash,
+            transactionHash = transactionHash,
             acsChangeFactory = acsChangeFactory,
             contractInfos = contractsToBeStored.map { contractInstance =>
               val contractId = contractInstance.contractId
@@ -1327,7 +1352,7 @@ class TransactionProcessingSteps(
         witnessed = usedAndCreated.contracts.witnessed,
         completionInfoO = completionInfoO,
         lfTx = validSubTransaction,
-        externalTransactionHash =
+        transactionHash =
           pendingRequestData.transactionValidationResult.validatedExternalTransactionHash,
       )
     } yield commitAndContractsAndEvent

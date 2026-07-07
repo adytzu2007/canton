@@ -6,7 +6,6 @@ package com.digitalasset.canton.http.json
 import cats.implicits.toFunctorOps
 import com.daml.ledger.api.v2 as lapi
 import com.daml.ledger.api.v2.value.{Identifier, Record, Value}
-import com.daml.nonempty.NonEmpty
 import com.daml.scalatest.Equalz.convertToAnyShouldWrapper
 import com.digitalasset.canton.http.json.v2.LegacyDTOs.GetUpdateTreesResponse.Update
 import com.digitalasset.canton.http.json.v2.LegacyDTOs.TreeEvent.Kind
@@ -28,6 +27,7 @@ import com.digitalasset.canton.{
   LfPartyId,
 }
 import com.digitalasset.daml.lf.data.Ref.IdString
+import com.digitalasset.nonempty.NonEmpty
 import com.google.protobuf.ByteString
 import com.google.rpc.Code
 import magnolify.scalacheck.semiauto.ArbitraryDerivation
@@ -202,9 +202,12 @@ object Arbitraries {
     val arb = ArbitraryDerivation[lapi.transaction.Transaction]
     Arbitrary {
       arb.arbitrary.retryUntil(v => v.effectiveAt.isDefined && v.recordTime.isDefined).map { tx =>
-        val hash32Bytes =
-          ByteString.copyFrom(Array.fill(32)(scala.util.Random.nextInt(256).toByte))
-        tx.copy(externalTransactionHash = Some(hash32Bytes))
+        val transactionHash32Bytes = ByteString.copyFrom(scala.util.Random.nextBytes(32))
+        val externalTransactionHash32Bytes = ByteString.copyFrom(scala.util.Random.nextBytes(32))
+        tx.copy(
+          externalTransactionHash = Some(externalTransactionHash32Bytes),
+          transactionHash = Some(transactionHash32Bytes),
+        )
       }
     }
   }

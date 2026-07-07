@@ -6,7 +6,6 @@ package com.digitalasset.canton.participant.topology
 import cats.data.EitherT
 import cats.implicits.catsSyntaxSemigroup
 import cats.syntax.either.*
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.LfPackageId
 import com.digitalasset.canton.config.RequireTypes.{NonNegativeInt, PositiveInt}
 import com.digitalasset.canton.data.Offset
@@ -19,7 +18,7 @@ import com.digitalasset.canton.participant.store.{
   DamlPackageStore,
   ReassignmentStore,
 }
-import com.digitalasset.canton.platform.store.backend.ParameterStorageBackend
+import com.digitalasset.canton.platform.store.backend.LedgerEnd
 import com.digitalasset.canton.store.packagemeta.PackageMetadata
 import com.digitalasset.canton.topology.TopologyManagerError.ParticipantTopologyManagerError.*
 import com.digitalasset.canton.topology.transaction.HostingParticipant
@@ -34,6 +33,7 @@ import com.digitalasset.canton.tracing.TraceContext
 import com.digitalasset.canton.util.MonadUtil
 import com.digitalasset.canton.util.ShowUtil.*
 import com.digitalasset.canton.version.ProtocolVersion
+import com.digitalasset.nonempty.NonEmpty
 
 import scala.concurrent.ExecutionContext
 
@@ -156,7 +156,7 @@ trait ParticipantTopologyValidation extends NamedLogging {
       nextHostingParticipants: Seq[HostingParticipant],
       forceFlags: ForceFlags,
       reassignmentStores: () => Map[SynchronizerId, ReassignmentStore],
-      ledgerEnd: () => FutureUnlessShutdown[Option[ParameterStorageBackend.LedgerEnd]],
+      ledgerEnd: () => Option[LedgerEnd],
   )(implicit
       traceContext: TraceContext,
       ec: ExecutionContext,
@@ -165,10 +165,9 @@ trait ParticipantTopologyValidation extends NamedLogging {
       case (synchronizerId, reassignmentStore) =>
         EitherT(
           for {
-            ledgerEnd <- ledgerEnd()
             incompleteReassignments <- reassignmentStore.findIncomplete(
               sourceSynchronizer = None,
-              validAt = ledgerEnd.map(_.lastOffset).getOrElse(Offset.firstOffset),
+              validAt = ledgerEnd().map(_.lastOffset).getOrElse(Offset.firstOffset),
               stakeholders = NonEmpty.from(Set(party.toLf)),
               limit = NonNegativeInt.maxValue,
             )

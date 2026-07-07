@@ -240,6 +240,7 @@ class SequencerNodeBootstrap(
     })
     addCloseable(sequencerPublicApiHealthService)
     addCloseable(sequencerHealth)
+    addCloseable(asyncWriterHealth)
 
     private def createSequencerFactory(
         protocolVersion: ProtocolVersion
@@ -947,6 +948,7 @@ class SequencerNodeBootstrap(
           val node = new SequencerNode(
             config,
             clock,
+            storage,
             sequencerRuntime,
             adminTokenDispenser,
             synchronizerLoggerFactory,
@@ -980,6 +982,13 @@ class SequencerNodeBootstrap(
     SequencerHealthStatus.shutdownStatus,
   )
 
+  // Deferred health component for the block sequencer's background writer, created during
+  // initialization. It is used as a fatal dependency of the liveness health service so that the
+  // node transitions to NOT_SERVING and is restarted if the background writer can no longer make
+  // progress. Non-block sequencers never set a delegate, so it stays non-fatal.
+  private lazy val asyncWriterHealth =
+    MutableHealthComponent(loggerFactory, "block-sequencer-async-writer", timeouts)
+
   // The service exposed by the gRPC health endpoint of sequencer public API
   // This will be used by sequencer clients who perform client-side load balancing to determine sequencer health
   private lazy val sequencerPublicApiHealthService = DependenciesHealthService(
@@ -992,15 +1001,21 @@ class SequencerNodeBootstrap(
   override protected def mkNodeHealthService(
       storage: Storage
   ): (DependenciesHealthService, LivenessHealthService) = {
+    // We use the storage as a fatal dependency so that we transition liveness to NOT_SERVING if
+    // the storage fails continuously for longer than `failedToFatalDelay`.
+    // The background writer health is fatal as well: once a background write fails, the writer can
+    // no longer make progress, so the node must be restarted.
+    val liveness = LivenessHealthService(
+      logger,
+      timeouts,
+      fatalDependencies = Seq(storage, asyncWriterHealth),
+    )
     val readiness = DependenciesHealthService(
       "sequencer",
       logger,
       timeouts,
-      Seq(storage),
+      criticalDependencies = liveness.dependencies ++ Seq(sequencerHealth),
     )
-    // We use the storage as a fatal dependency so that we transition liveness to NOT_SERVING if
-    // the storage fails continuously for longer than `failedToFatalDelay`.
-    val liveness = LivenessHealthService(logger, timeouts, fatalDependencies = Seq(storage))
     (readiness, liveness)
   }
 
@@ -1061,6 +1076,8 @@ class SequencerNodeBootstrap(
 
       // wait for the server to be initialized before reporting a serving health state
       _ = sequencerHealth.set(runtime.sequencer)
+      // bind the background writer health (block sequencers only) into the liveness fatal dependency
+      _ = runtime.sequencer.backgroundWriterHealth.foreach(asyncWriterHealth.set)
     } yield sequencerNodeServer
   }
 }
@@ -1068,6 +1085,7 @@ class SequencerNodeBootstrap(
 class SequencerNode(
     config: SequencerNodeConfig,
     override protected val clock: Clock,
+    storage: Storage,
     val sequencer: SequencerRuntime,
     override val adminTokenDispenser: CantonAdminTokenDispenser,
     protected val loggerFactory: NamedLoggerFactory,
@@ -1086,7 +1104,7 @@ class SequencerNode(
 
   logger.info(s"Creating sequencer server with public api ${config.publicApi}")(TraceContext.empty)
 
-  override def isActive = true
+  override def isActive = storage.isActive
 
   override def status: SequencerNodeStatus = {
     val healthStatus = sequencer.health

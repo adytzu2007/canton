@@ -38,11 +38,13 @@ import com.digitalasset.canton.ledger.error.LedgerApiErrors.ParticipantContractP
 import com.digitalasset.canton.ledger.error.groups.RequestValidationErrors.ParticipantPruningInProgress
 import com.digitalasset.canton.logging.SuppressionRule
 import com.digitalasset.canton.participant.ledger.api.client.JavaDecodeUtil
+import com.digitalasset.canton.platform.store.backend.common.ComposableQuery.SqlStringInterpolation
 import com.digitalasset.canton.topology.SynchronizerId
 import com.digitalasset.daml.lf.value.Value.ContractId
 import monocle.macros.syntax.lens.*
 import org.slf4j.event
 
+import java.sql.Connection
 import java.time.Duration as JDuration
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
@@ -52,6 +54,7 @@ import scala.jdk.CollectionConverters.*
 trait LedgerApiParticipantPruningTest
     extends CommunityIntegrationTest
     with SharedEnvironment
+    with DbLockingSupport
     with HasCycleUtils {
   import scala.language.reflectiveCalls
 
@@ -174,8 +177,7 @@ trait LedgerApiParticipantPruningTest
       participant1.pruning.get_offset_by_time(tsOfLastPrunedEvent.toInstant)
 
     // Simulate concurrent pruning from another replica by issuing the pruning lock
-    val lockedPruning =
-      participant1.underlying.value.sync.participantNodePersistentState.value.ledgerApiStore.lockPruning
+    val lockedPruning = withConnectionForTest(participant1)(lockPruning(participant1))
 
     // Prune and remember offsets.
     val pruneF = Future(participant1.pruning.prune(offsetAtTheBeginning))
@@ -194,16 +196,14 @@ trait LedgerApiParticipantPruningTest
     lockedPruning.commitAndClose()
     pruneF.futureValue
     participant1.testing.state_inspection.internalContractIdOf(cidBeginningContractId) shouldBe None
-    participant1.testing.state_inspection.internalContractIdOf(
-      cidMiddleContractId
-    ) should not be empty
+    val cidMiddleInternalContractIdOpt =
+      participant1.testing.state_inspection.internalContractIdOf(cidMiddleContractId)
+    cidMiddleInternalContractIdOpt should not be empty
 
     // Simulate blocking pruning by read locking one of the to-be-pruned contracts
-    val contractLock =
-      participant1.underlying.value.sync.participantNodePersistentState.value.ledgerApiStore
-        .readLockContract(
-          participant1.testing.state_inspection.internalContractIdOf(cidMiddleContractId).value
-        )
+    val contractLock = withConnectionForTest(participant1)(
+      readLockContract(participant1, cidMiddleInternalContractIdOpt.value)
+    )
 
     // Pruning fails if contract pruning cannot resolve the optimistic lock after retries
     loggerFactory.assertThrowsAndLogs[CommandFailure](
@@ -465,31 +465,28 @@ trait LedgerApiParticipantPruningTest
       val c1InternalContractId =
         participant1.testing.state_inspection.internalContractIdOf(c1ContractId).value
 
-      val (_, c2cid) = createContract(participant1, daId)
-      val c2ContractId = ContractId.assertFromString(c2cid)
-      val c2InternalContractId =
-        participant1.testing.state_inspection.internalContractIdOf(c2ContractId).value
-
-      // this is needed for the locking approach to work later
-      c1InternalContractId should be < (c2InternalContractId)
-
       // unassign
       val unassign = participant1.ledger_api.commands.submit_unassign(
         submitter = participant1.adminParty,
-        contractIds = Seq(c1ContractId, c2ContractId),
+        contractIds = Seq(c1ContractId),
         source = daId,
         target = acmeId,
       )
 
       val pruningOffset = participant1.ledger_api.state.end()
 
-      // issue write lock on participant1 for C1, this will block the Indexer at ingestion of the following assignation on the first contract
-      val c1Lock =
-        participant1.underlying.value.sync.participantNodePersistentState.value.ledgerApiStore
-          .writeLockContract(c1InternalContractId)
+      // issue write lock on participant1 for C1, this will block the Indexer at ingestion of the following assignation on the contract
+      val c1Lock = withConnectionForTest(participant1)(
+        testFunction = writeLockContract(participant1, c1InternalContractId),
+        onCommit = conn => {
+          // simulate pruning by manually remove C1 from the contract store
+          deleteContract(participant1, c1InternalContractId)(conn)
+          logger.info("C1 contract removed")
+        },
+      )
       logger.info("C1 locked")
 
-      // reassign C1 and C2 to acme, this should be blocked on Indexing the assignment because of the lock above
+      // reassign C1 to acme, this should be blocked on Indexing the assignment because of the lock above
       val reassignmentF = Future(
         participant1.ledger_api.commands.submit_assign(
           submitter = participant1.adminParty,
@@ -498,16 +495,11 @@ trait LedgerApiParticipantPruningTest
           target = acmeId,
         )
       )
-      logger.info("Reassignment of C1,C2 started")
+      logger.info("Reassignment of C1 started")
 
       // wait a little to make sure the assignment is already blocked
       Threading.sleep(5000)
-      logger.info("Waited 5 second")
-
-      // simulate pruning by manually remove C2 from the contract store
-      participant1.testing.state_inspection.deleteContract(c2InternalContractId)
-      participant1.testing.state_inspection.internalContractIdOf(c2ContractId) shouldBe None
-      logger.info("C2 contract removed")
+      logger.info("Waited 5 seconds")
 
       loggerFactory.assertLogsSeq(
         SuppressionRule.Level(event.Level.INFO) &&
@@ -530,10 +522,10 @@ trait LedgerApiParticipantPruningTest
         },
       )
 
-      // C2 is reinserted
-      val c2NewInternalContractId =
-        participant1.testing.state_inspection.internalContractIdOf(c2ContractId).value
-      c2InternalContractId should be < (c2NewInternalContractId)
+      // C1 is reinserted
+      val c1NewInternalContractId =
+        participant1.testing.state_inspection.internalContractIdOf(c1ContractId).value
+      c1InternalContractId should be < (c1NewInternalContractId)
 
       // pruning before assign so that referential integrity is restored
       waitUntilSafeToPrune(participant1, Some(pruningOffset))
@@ -572,29 +564,6 @@ trait LedgerApiParticipantPruningTest
       logger.info(s"safe offset $safeOffset compared to $pruningOffset")
       safeOffset should be > pruningOffset
     }
-  }
-
-  private def createContract(
-      participant: LocalParticipantReference,
-      synchronizerId: SynchronizerId,
-  ): (String, String) = {
-    val partyId = participant.id.adminParty
-    val createCmd = new test.Dummy(partyId.toProtoPrimitive).create.commands.asScala.toSeq
-    val createTx = participant.ledger_api.javaapi.commands
-      .submit(
-        Seq(partyId),
-        createCmd,
-        commandId = s"createContract-${UUID.randomUUID()}",
-        synchronizerId = Some(synchronizerId),
-      )
-    val cid = createTx.getEvents.asScala.collectFirst {
-      case x if x.toProtoEvent.hasCreated =>
-        val contractId = x.toProtoEvent.getCreated.getContractId
-        logger.info(s"Created contract $contractId at offset ${createTx.getOffset}")
-        contractId
-    }.value
-
-    (createTx.getUpdateId, cid)
   }
 
   private def createAndExerciseContract(
@@ -685,6 +654,17 @@ trait LedgerApiParticipantPruningTest
       .value
     offer.id.exerciseAcceptByPainter().commands.loneElement
   }
+
+  def deleteContract(participant: LocalParticipantReference, internalContractId: Long)(implicit
+      conn: Connection
+  ): Int = {
+    val removed = SQL"DELETE FROM par_contracts WHERE internal_contract_id=$internalContractId"
+      .executeUpdate()(conn)
+    participant.underlying.value.sync.participantNodePersistentState.value.contractStore
+      .contractsPruned(List(internalContractId))
+    removed
+  }
+
 }
 
 class LedgerApiParticipantPruningTestPostgres extends LedgerApiParticipantPruningTest {

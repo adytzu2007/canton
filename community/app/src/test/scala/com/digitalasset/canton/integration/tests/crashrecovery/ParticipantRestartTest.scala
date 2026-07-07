@@ -25,7 +25,6 @@ import com.daml.ledger.javaapi as javab
 import com.daml.ledger.javaapi.data.{Command, Transaction}
 import com.daml.metrics.ExecutorServiceMetrics
 import com.daml.metrics.api.noop.NoOpMetricsFactory
-import com.daml.nonempty.NonEmpty
 import com.daml.test.evidence.scalatest.ScalaTestSupport.Implicits.*
 import com.daml.test.evidence.tag.Reliability.{
   AdverseScenario,
@@ -42,7 +41,6 @@ import com.digitalasset.canton.admin.api.client.commands.LedgerApiCommands.Updat
   UpdateWrapper,
 }
 import com.digitalasset.canton.admin.api.client.data.NodeStatus
-import com.digitalasset.canton.annotations.UnstableTest
 import com.digitalasset.canton.concurrent.Threading
 import com.digitalasset.canton.config.*
 import com.digitalasset.canton.config.CantonRequireTypes.InstanceName
@@ -146,6 +144,7 @@ import com.digitalasset.canton.{
   SynchronizerAlias,
   config,
 }
+import com.digitalasset.nonempty.NonEmpty
 import io.grpc.Status
 import monocle.macros.syntax.lens.*
 import org.scalactic.source.Position
@@ -610,8 +609,7 @@ class ParticipantRestartCausalityIntegrationTest extends ParticipantRestartTest 
   override lazy val environmentDefinition: EnvironmentDefinition =
     EnvironmentDefinition.P4S2M2_Manual
       .addConfigTransforms(
-        ConfigTransforms.updateTargetTimestampForwardTolerance(30.seconds),
-        ConfigTransforms.enableMultiSynchronizerTopologyFeatureFlag,
+        ConfigTransforms.enableMultiSynchronizerTopologyFeatureFlag
       )
       .withSetup { implicit env =>
         NetworkBootstrapper(EnvironmentDefinition.S1M1_S1M1)
@@ -2379,11 +2377,9 @@ abstract class ParticipantRestartStaticTimeIntegrationTestBase(
 
 }
 
-@UnstableTest // TODO(#19922)
 class ParticipantRestartStaticTimeIntegrationTest
     extends ParticipantRestartStaticTimeIntegrationTestBase
 
-@UnstableTest // TODO(#30408)
 class ParticipantRestartStaticTimeReassignmentIntegrationTest
     extends ParticipantRestartStaticTimeIntegrationTestBase(enableAllLedgerApiReassignments = true)
 

@@ -9,7 +9,7 @@ import cats.syntax.either.*
 import cats.syntax.functor.*
 import cats.syntax.functorFilter.*
 import cats.syntax.parallel.*
-import com.daml.nonempty.NonEmpty
+import cats.syntax.traverse.*
 import com.digitalasset.base.error.RpcError
 import com.digitalasset.canton.*
 import com.digitalasset.canton.common.sequencer.grpc.SequencerInfoLoader
@@ -64,6 +64,7 @@ import com.digitalasset.canton.participant.synchronizer.*
 import com.digitalasset.canton.participant.topology.*
 import com.digitalasset.canton.participant.topology.client.MissingKeysAlerter
 import com.digitalasset.canton.platform.apiserver.execution.CommandProgressTracker
+import com.digitalasset.canton.platform.apiserver.services.command.TrafficEnforcementBackend
 import com.digitalasset.canton.protocol.StaticSynchronizerParameters
 import com.digitalasset.canton.resource.DbExceptionRetryPolicy
 import com.digitalasset.canton.sequencing.SequencerConnectionValidation
@@ -77,11 +78,13 @@ import com.digitalasset.canton.topology.client.{
   SynchronizerTopologyClientWithInit,
   TopologySnapshot,
 }
+import com.digitalasset.canton.topology.transaction.SignedTopologyTransaction.GenericSignedTopologyTransaction
 import com.digitalasset.canton.tracing.{Spanning, TraceContext, Traced}
 import com.digitalasset.canton.util.*
 import com.digitalasset.canton.util.OptionUtils.OptionExtension
 import com.digitalasset.canton.util.retry.Backoff
 import com.digitalasset.daml.lf.engine.Engine
+import com.digitalasset.nonempty.NonEmpty
 import com.google.common.collect.{BiMap, HashBiMap}
 import io.grpc.Status
 import io.opentelemetry.api.trace.Tracer
@@ -129,6 +132,7 @@ private[sync] class SynchronizerConnectionsManager(
     engine: Engine,
     commandProgressTracker: CommandProgressTracker,
     syncEphemeralStateFactory: SyncEphemeralStateFactory,
+    trafficEnforcementBackendO: Option[Eval[TrafficEnforcementBackend]],
     clock: Clock,
     resourceManagementService: ResourceManagementService,
     parameters: ParticipantNodeParameters,
@@ -177,7 +181,6 @@ private[sync] class SynchronizerConnectionsManager(
 
   private val reassignmentCoordination: ReassignmentCoordination =
     ReassignmentCoordination(
-      reassignmentsConfig = parameters.reassignmentsConfig,
       syncPersistentStateManager = syncPersistentStateManager,
       submissionHandles = connectedSynchronizers.get,
       synchronizerId =>
@@ -346,6 +349,7 @@ private[sync] class SynchronizerConnectionsManager(
               con,
               connectSynchronizer = ConnectSynchronizer.ReconnectSynchronizers,
               skipStatusCheck = false,
+              onboardingTransactions = None,
             ).transform {
               case Left(SyncServiceFailedSynchronizerConnection(_, parent)) if ignoreFailures =>
                 // if the error is retryable, we'll reschedule an automatic retry so this synchronizer gets connected eventually
@@ -501,6 +505,7 @@ private[sync] class SynchronizerConnectionsManager(
       keepRetrying: Boolean,
       connectSynchronizer: ConnectSynchronizer,
       logLevelFailureInitialAttempt: Level = Level.WARN,
+      onboardingTransactions: Option[NonEmpty[Seq[GenericSignedTopologyTransaction]]],
   )(implicit
       traceContext: TraceContext
   ): EitherT[FutureUnlessShutdown, SyncServiceError, Option[PhysicalSynchronizerId]] = {
@@ -536,6 +541,7 @@ private[sync] class SynchronizerConnectionsManager(
           initial = initial,
           connectSynchronizer = connectSynchronizer,
           logLevelFailureInitialAttempt = logLevelFailureInitialAttempt,
+          onboardingTransactions = onboardingTransactions,
         )
       }
   }
@@ -552,6 +558,7 @@ private[sync] class SynchronizerConnectionsManager(
       initial: Boolean,
       connectSynchronizer: ConnectSynchronizer,
       logLevelFailureInitialAttempt: Level = Level.WARN,
+      onboardingTransactions: Option[NonEmpty[Seq[GenericSignedTopologyTransaction]]],
   )(implicit
       traceContext: TraceContext
   ): EitherT[FutureUnlessShutdown, SyncServiceError, Option[PhysicalSynchronizerId]] =
@@ -563,6 +570,7 @@ private[sync] class SynchronizerConnectionsManager(
           synchronizerAlias,
           connectSynchronizer,
           skipStatusCheck = false,
+          onboardingTransactions = onboardingTransactions,
         ).transform {
           case Left(SyncServiceError.SyncServiceFailedSynchronizerConnection(_, err))
               if keepRetrying && err.retryable.nonEmpty =>
@@ -629,6 +637,7 @@ private[sync] class SynchronizerConnectionsManager(
             keepRetrying = true,
             initial = false,
             connectSynchronizer = connectSynchronizer,
+            onboardingTransactions = None,
           ),
           s"Background reconnect to $synchronizerAlias",
         )
@@ -636,7 +645,13 @@ private[sync] class SynchronizerConnectionsManager(
       nextO.foreach(scheduleReconnectAttempt(_, connectSynchronizer))
     }
 
-    clock.scheduleAt(reconnectAttempt, timestamp).discard
+    clock
+      .scheduleAtCancelledOnShutdown(
+        reconnectAttempt,
+        s"${getClass.getName}: scheduling reconnection",
+        timestamp,
+      )
+      .discard
   }
 
   /** Get the synchronizer connection corresponding to the alias. Fail if no connection can be
@@ -701,6 +716,7 @@ private[sync] class SynchronizerConnectionsManager(
       synchronizerAlias: SynchronizerAlias,
       connectSynchronizer: ConnectSynchronizer,
       skipStatusCheck: Boolean,
+      onboardingTransactions: Option[NonEmpty[Seq[GenericSignedTopologyTransaction]]],
   )(implicit
       traceContext: TraceContext
   ): EitherT[FutureUnlessShutdown, SyncServiceError, PhysicalSynchronizerId] =
@@ -715,6 +731,7 @@ private[sync] class SynchronizerConnectionsManager(
           synchronizerAlias,
           startConnectedSynchronizerProcessing = connectSynchronizer.startConnectedSynchronizer,
           skipStatusCheck = skipStatusCheck,
+          onboardingTransactions = onboardingTransactions,
         )
     }
 
@@ -763,7 +780,10 @@ private[sync] class SynchronizerConnectionsManager(
             s"Performing handshake with synchronizer with id ${synchronizerConnectionConfig.configuredPsid} and config: ${synchronizerConnectionConfig.config}"
           )
           synchronizerHandle <- EitherT(
-            synchronizerRegistry.connect(synchronizerConnectionConfig)
+            synchronizerRegistry.connect(
+              synchronizerConnectionConfig,
+              onboardingTransactions = None,
+            )
           )
             .leftMap[SyncServiceError](err =>
               SyncServiceError.SyncServiceFailedSynchronizerConnection(synchronizerAlias, err)
@@ -1005,6 +1025,7 @@ private[sync] class SynchronizerConnectionsManager(
       synchronizerAlias: SynchronizerAlias,
       startConnectedSynchronizerProcessing: Boolean,
       skipStatusCheck: Boolean,
+      onboardingTransactions: Option[NonEmpty[Seq[GenericSignedTopologyTransaction]]],
   )(implicit
       traceContext: TraceContext
   ): EitherT[FutureUnlessShutdown, SyncServiceError, PhysicalSynchronizerId] = {
@@ -1015,7 +1036,7 @@ private[sync] class SynchronizerConnectionsManager(
       SyncServiceFailedSynchronizerConnection,
       SynchronizerHandle,
     ] =
-      EitherT(synchronizerRegistry.connect(config)).leftMap(err =>
+      EitherT(synchronizerRegistry.connect(config, onboardingTransactions)).leftMap(err =>
         SyncServiceError.SyncServiceFailedSynchronizerConnection(synchronizerAlias, err)
       )
 
@@ -1200,6 +1221,7 @@ private[sync] class SynchronizerConnectionsManager(
               reassignmentCoordination,
               commandProgressTracker,
               clock,
+              trafficEnforcementBackendO,
               promiseUSFactory,
               connectedSynchronizerMetrics,
               futureSupervisor,
@@ -1356,32 +1378,34 @@ private[sync] class SynchronizerConnectionsManager(
       synchronizerAlias: SynchronizerAlias
   )(implicit traceContext: TraceContext): Either[SyncServiceError, Unit] = {
     logger.info(show"Disconnecting from $synchronizerAlias")
-    (for {
-      synchronizerId <- aliasManager.synchronizerIdForAlias(synchronizerAlias)
-    } yield {
-      val removedO = connectedSynchronizers.psidFor(synchronizerId).flatMap { psid =>
-        syncCrypto.remove(psid)
-        connectedSynchronizers.remove(psid)
+
+    aliasManager
+      .synchronizerIdForAlias(synchronizerAlias)
+      .map { synchronizerId =>
+        val removedO = connectedSynchronizers.psidFor(synchronizerId).flatMap { psid =>
+          syncCrypto.remove(psid)
+          connectedSynchronizers.remove(psid)
+        }
+        removedO match {
+          case Some(connectedSynchronizer) =>
+            logger.info(s"Disconnecting connected synchronizer ${connectedSynchronizer.psid}")
+            Try(LifeCycle.close(connectedSynchronizer)(logger)) match {
+              case Success(_) =>
+                logger.info(show"Disconnected from $synchronizerAlias")
+              case Failure(ex) =>
+                if (parameters.exitOnFatalFailures)
+                  FatalError.exitOnFatalError(
+                    show"Failed to disconnect from $synchronizerAlias due to an exception",
+                    ex,
+                    logger,
+                  )
+                else throw ex
+            }
+          case None =>
+            logger.info(show"Nothing to do, as we are not connected to $synchronizerAlias")
+        }
       }
-      removedO match {
-        case Some(connectedSynchronizer) =>
-          logger.info(s"Disconnecting connected synchronizer ${connectedSynchronizer.psid}")
-          Try(LifeCycle.close(connectedSynchronizer)(logger)) match {
-            case Success(_) =>
-              logger.info(show"Disconnected from $synchronizerAlias")
-            case Failure(ex) =>
-              if (parameters.exitOnFatalFailures)
-                FatalError.exitOnFatalError(
-                  show"Failed to disconnect from $synchronizerAlias due to an exception",
-                  ex,
-                  logger,
-                )
-              else throw ex
-          }
-        case None =>
-          logger.info(show"Nothing to do, as we are not connected to $synchronizerAlias")
-      }
-    }).toRight(SyncServiceError.SyncServiceUnknownSynchronizer.Error(synchronizerAlias))
+      .toRight(SyncServiceError.SyncServiceUnknownSynchronizer.Error(synchronizerAlias))
   }
 
   /** Disconnect from all connected synchronizers. */
@@ -1391,6 +1415,7 @@ private[sync] class SynchronizerConnectionsManager(
     connectedSynchronizers.lsids.toList
       .mapFilter(aliasManager.aliasForSynchronizerId)
       .distinct
+      // TODO(#33650) – Safe because there is one to a few synchronizers ever
       .parTraverse_(disconnectSynchronizer)
 
   /** Start the upgrade of the participant to the successor (automatic workflow).
@@ -1449,6 +1474,7 @@ private[sync] class SynchronizerConnectionsManager(
             Hence, we decrease the level from WARN to INFO.
              */
             logLevelFailureInitialAttempt = Level.INFO,
+            onboardingTransactions = None,
           )(tc),
         disconnectSynchronizer = disconnectSynchronizer(alias)(_),
         metrics,
@@ -1513,6 +1539,7 @@ private[sync] class SynchronizerConnectionsManager(
             alias,
             keepRetrying = true,
             connectSynchronizer = ConnectSynchronizer.Connect,
+            onboardingTransactions = None,
           )(tc),
         disconnectSynchronizer = disconnectSynchronizer(alias)(_),
         metrics,
@@ -1595,7 +1622,7 @@ private[sync] class SynchronizerConnectionsManager(
           for {
             topology <- getSnapshot(synchronizerAlias, synchronizerId)
             // Find the attributes for the party if one is passed in, and if we can find it in topology
-            attributesO <- request.party.parFlatTraverse(party =>
+            attributesO <- request.party.flatTraverse(party =>
               topology
                 .hostedOn(
                   Set(party),

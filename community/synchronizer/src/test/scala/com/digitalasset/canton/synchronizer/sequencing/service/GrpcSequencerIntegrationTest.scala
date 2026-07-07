@@ -7,7 +7,6 @@ import cats.data.EitherT
 import cats.syntax.either.*
 import com.daml.grpc.adapter.ExecutionSequencerFactory
 import com.daml.metrics.api.MetricsContext
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.concurrent.FutureSupervisor
 import com.digitalasset.canton.config.RequireTypes.{
   NonNegativeInt,
@@ -60,6 +59,7 @@ import com.digitalasset.canton.protocol.{
   TestSynchronizerParameters,
   v30 as protocolV30,
   v31 as protocolV31,
+  v32 as protocolV32,
 }
 import com.digitalasset.canton.sequencer.api.v30
 import com.digitalasset.canton.sequencer.api.v30.SequencerAuthenticationServiceGrpc.SequencerAuthenticationService
@@ -92,6 +92,7 @@ import com.digitalasset.canton.version.{
   RepresentativeProtocolVersion,
 }
 import com.digitalasset.canton.{config, *}
+import com.digitalasset.nonempty.NonEmpty
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder
 import io.grpc.{Server, StatusRuntimeException}
 import io.opentelemetry.api.trace.Tracer
@@ -652,6 +653,9 @@ class GrpcSequencerIntegrationTest
 
     override def toProtoSomeEnvelopeContentV31: protocolV31.EnvelopeContent.SomeEnvelopeContent =
       protocolV31.EnvelopeContent.SomeEnvelopeContent.Empty
+
+    override def toProtoSomeEnvelopeContentV32: protocolV32.EnvelopeContent.SomeEnvelopeContent =
+      protocolV32.EnvelopeContent.SomeEnvelopeContent.Empty
   }
 }
 

@@ -7,16 +7,15 @@ import cats.data.EitherT
 import cats.syntax.either.*
 import cats.syntax.foldable.*
 import cats.syntax.traverse.*
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.config.RequireTypes.NonNegativeInt
 import com.digitalasset.canton.crypto.{HashOps, Signature, SignatureCheckError, SyncCryptoApi}
 import com.digitalasset.canton.lifecycle.FutureUnlessShutdown
 import com.digitalasset.canton.logging.pretty.Pretty
 import com.digitalasset.canton.protocol.messages.{
-  AcsCommitment,
-  AcsCommitmentProtocolMessage,
   DefaultOpenEnvelope,
   EnvelopeContent,
+  LegacyAcsCommitment,
+  LegacyAcsCommitmentProtocolMessage,
   ProtocolMessage,
   SignedProtocolMessage,
   TypedSignedProtocolMessageContent,
@@ -39,6 +38,7 @@ import com.digitalasset.canton.version.{
   VersioningCompanion,
 }
 import com.digitalasset.canton.{ProtoDeserializationError, checkedToByteString}
+import com.digitalasset.nonempty.NonEmpty
 import com.google.common.annotations.VisibleForTesting
 import com.google.protobuf.ByteString
 import monocle.Lens
@@ -86,7 +86,7 @@ final case class ClosedUncompressedEnvelope private[protocol] (
           .fromByteString(hashOps, protocolVersion)(bytes)
           .flatMap { envelopeContent =>
             envelopeContent.message match {
-              case AcsCommitmentProtocolMessage(acsCommitment, signatures)
+              case LegacyAcsCommitmentProtocolMessage(acsCommitment, signatures)
                   if protocolVersion >= ProtocolVersion.v35 =>
                 Right(
                   OpenEnvelope(
@@ -97,7 +97,7 @@ final case class ClosedUncompressedEnvelope private[protocol] (
                     recipients,
                   )(protocolVersion)
                 )
-              case internal: AcsCommitmentProtocolMessage
+              case internal: LegacyAcsCommitmentProtocolMessage
                   if protocolVersion < ProtocolVersion.v35 =>
                 Left(
                   ProtoDeserializationError.OtherError(
@@ -231,7 +231,7 @@ object ClosedUncompressedEnvelope extends VersioningCompanion[ClosedUncompressed
       protocolVersion: ProtocolVersion,
   ): ClosedUncompressedEnvelope =
     protocolMessage match {
-      case internal: AcsCommitmentProtocolMessage =>
+      case internal: LegacyAcsCommitmentProtocolMessage =>
         throw new IllegalStateException(
           s"You cannot have envelopes containing internal types such as ${internal.showType}."
         )
@@ -244,10 +244,10 @@ object ClosedUncompressedEnvelope extends VersioningCompanion[ClosedUncompressed
         )
       case SignedProtocolMessage(typedMessage, signatures) =>
         typedMessage.content match {
-          case acsCommitment: AcsCommitment if protocolVersion >= ProtocolVersion.v35 =>
+          case acsCommitment: LegacyAcsCommitment if protocolVersion >= ProtocolVersion.v35 =>
             ClosedUncompressedEnvelope.create(
               EnvelopeContent(
-                AcsCommitmentProtocolMessage(acsCommitment, signatures),
+                LegacyAcsCommitmentProtocolMessage(acsCommitment, signatures),
                 protocolVersion,
               ).toByteString,
               recipients,

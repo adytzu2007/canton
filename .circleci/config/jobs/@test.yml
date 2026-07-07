@@ -142,7 +142,7 @@ stability_crash_recovery_test:
       type: boolean
       default: true
   executor: canton-xlarge-docker-with-postgres
-  parallelism: 64 # The number of test runs. Increase to make the test more "aggressive".
+  parallelism: 16 # The number of test runs. Increase to make the test more "aggressive".
   # Should be a multiple of the num_test_buckets parameter below so that each test bucket gets executed the same number of times.
   steps:
     - run_crash_recovery_tests:
@@ -156,7 +156,7 @@ stability_crash_recovery_test_alerting:
   steps:
     - checkout
     - check_number_of_successes:
-        min_successes: 32 # Low threshold, since test failures are reported to datadog anyway
+        min_successes: 8 # Low threshold, since test failures are reported to datadog anyway
         job_name: "stability_crash_recovery_test"
     - slack_red_main_with_volunteer
 
@@ -257,6 +257,21 @@ protocol_continuity_test_latest:
         num_test_buckets: "2"
         num_parallel_tasks: "1"
         timeout: "30m"
+
+# Job used to run the ACS commitment tests in PV DEV, which are currently excluded from the regular test runs on dev branches.
+# This allows us to run them more frequently and get faster feedback during development of the redesigned ACS commitment feature.
+# TODO(#33536): Remove this job and usages once the ACS commitment redesign development is complete
+temp_acs_commitment_tests_pv_dev:
+  parameters:
+    override_java_version_for_tests:
+      type: string
+      default: ""
+  executor: canton-xlarge-docker-with-postgres
+  parallelism: 1
+  steps:
+    - set_canton_protocol_version:
+        protocol_version: "DEV"
+    - run_temp_acs_commitment_tests
 
 nightly_integration_test:
   executor: canton-xlarge-docker-with-postgres-toxiproxy

@@ -9,7 +9,6 @@ import cats.syntax.either.*
 import cats.syntax.foldable.*
 import cats.syntax.functor.*
 import cats.syntax.traverse.*
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.*
 import com.digitalasset.canton.config.ProcessingTimeout
 import com.digitalasset.canton.config.RequireTypes.PositiveInt
@@ -54,6 +53,7 @@ import com.digitalasset.canton.util.ShowUtil.*
 import com.digitalasset.canton.util.retry.AllExceptionRetryPolicy
 import com.digitalasset.daml.lf.CantonOnly
 import com.digitalasset.daml.lf.data.ImmArray
+import com.digitalasset.nonempty.NonEmpty
 import com.google.common.annotations.VisibleForTesting
 import org.apache.pekko.NotUsed
 import org.apache.pekko.stream.Materializer
@@ -535,9 +535,8 @@ final class RepairService(
         ledgerApiIndexer.value
           .ensureNoProcessingForSynchronizer(psid.logical)
       )
-      synchronizerIndex <- EitherT.right(
-        ledgerApiIndexer.value.ledgerApiStore.value.cleanSynchronizerIndex(psid.logical)
-      )
+      synchronizerIndex = ledgerApiIndexer.value.ledgerApiStore.value
+        .cleanSynchronizerIndex(psid.logical)
 
       startingPoints <- EitherT.right(
         SyncEphemeralStateFactory.startingPoints(
@@ -757,23 +756,24 @@ final class RepairService(
       synchronizerId: SynchronizerId,
       timestamp: CantonTimestamp,
   )(implicit traceContext: TraceContext): EitherT[FutureUnlessShutdown, String, Unit] = {
-    def check(): FutureUnlessShutdown[Either[String, Unit]] =
-      ledgerApiIndexer.value.ledgerApiStore.value
-        .cleanSynchronizerIndex(synchronizerId)
-        .map(SyncEphemeralStateFactory.lastSequencerTimestamp)
-        .map { lastSequencerTimestamp =>
-          if (lastSequencerTimestamp >= timestamp) {
-            logger.debug(
-              s"Clean sequencer index reached $lastSequencerTimestamp, clearing $timestamp"
-            )
-            Either.unit
-          } else {
-            val errMsg =
-              s"Clean sequencer index is still at $lastSequencerTimestamp which is not yet $timestamp"
-            logger.debug(errMsg)
-            Left(errMsg)
-          }
-        }
+    def check(): Either[String, Unit] = {
+      val lastSequencerTimestamp = SyncEphemeralStateFactory.lastSequencerTimestamp(
+        ledgerApiIndexer.value.ledgerApiStore.value
+          .cleanSynchronizerIndex(synchronizerId)
+      )
+      if (lastSequencerTimestamp >= timestamp) {
+        logger.debug(
+          s"Clean sequencer index reached $lastSequencerTimestamp, clearing $timestamp"
+        )
+        Either.unit
+      } else {
+        val errMsg =
+          s"Clean sequencer index is still at $lastSequencerTimestamp which is not yet $timestamp"
+        logger.debug(errMsg)
+        Left(errMsg)
+      }
+    }
+
     EitherT(
       retry
         .Pause(
@@ -784,7 +784,7 @@ final class RepairService(
           s"awaiting clean-head for=$synchronizerId at ts=$timestamp",
         )
         .unlessShutdown(
-          check(),
+          FutureUnlessShutdown.pure(check()),
           AllExceptionRetryPolicy,
         )
     )

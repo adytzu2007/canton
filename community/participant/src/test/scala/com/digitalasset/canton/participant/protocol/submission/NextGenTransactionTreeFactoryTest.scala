@@ -9,7 +9,12 @@ import com.digitalasset.canton.config.RequireTypes.NonNegativeInt
 import com.digitalasset.canton.crypto.{TestHash, TestSalt}
 import com.digitalasset.canton.data.ViewPosition.MerkleSeqIndex
 import com.digitalasset.canton.data.ViewPosition.MerkleSeqIndex.Direction
-import com.digitalasset.canton.data.{GenTransactionTree, ViewPosition}
+import com.digitalasset.canton.data.{
+  GenTransactionTree,
+  RollbackContextFactory,
+  TransactionViewDecompositionFactory,
+  ViewPosition,
+}
 import com.digitalasset.canton.lifecycle.FutureUnlessShutdown
 import com.digitalasset.canton.lifecycle.FutureUnlessShutdownImpl.*
 import com.digitalasset.canton.participant.DefaultParticipantStateValues
@@ -44,6 +49,11 @@ final class NextGenTransactionTreeFactoryTest
     with BaseTest
     with HasExecutionContext
     with ProtocolVersionChecksAsyncWordSpec {
+
+  private val rolledBackState =
+    TransactionViewDecompositionFactory.RollbackState.empty.enterRollback
+  private val rollbackContextFactory = RollbackContextFactory(testedProtocolVersion)
+  private val rolledBackContext = rollbackContextFactory.fromRollbackState(rolledBackState)
 
   private def successfulLookup(example: ExampleTransaction): ContractInstanceOfId = id =>
     EitherT.fromEither[FutureUnlessShutdown](
@@ -99,6 +109,7 @@ final class NextGenTransactionTreeFactoryTest
       updatedTransaction,
       example.metadata,
       WithoutSuffixes,
+      rollbackContextFactory,
     )
   }
 
@@ -122,10 +133,14 @@ final class NextGenTransactionTreeFactoryTest
       updatedTransaction,
       metadata,
       WithoutSuffixes,
+      rollbackContextFactory,
     )
   }
 
-  forAll(Table("contract id version", CantonContractIdVersion.all*)) { contractIdVersion =>
+  private val testedContractIdVersions: Seq[CantonContractIdVersion] =
+    if (testedProtocolVersion >= ProtocolVersion.v35) CantonContractIdVersion.all else Seq.empty
+
+  forAll(Table("contract id version", testedContractIdVersions*)) { contractIdVersion =>
     val factory: ExampleTransactionFactory = new ExampleTransactionFactory(
       versionOverride = Some(testedProtocolVersion)
     )(cantonContractIdVersion = contractIdVersion)
@@ -203,7 +218,7 @@ final class NextGenTransactionTreeFactoryTest
               val tree = result.value
               tree.rootViews.unblindedElements should have size 2
               val view1 = tree.rootViews.unblindedElements.drop(1).headOption.value
-              val records = view1.viewParticipantData.tryUnwrap.externalCallResults.toSeq
+              val records = view1.viewParticipantData.tryUnwrap.externalCallResults
 
               records.map(record =>
                 (record.result, record.exerciseIndex, record.callIndex, record.checkingParties)
@@ -246,7 +261,7 @@ final class NextGenTransactionTreeFactoryTest
             ).value.map { result =>
               val tree = result.value
               val view1 = tree.rootViews.unblindedElements.drop(1).headOption.value
-              val records = view1.viewParticipantData.tryUnwrap.externalCallResults.toSeq
+              val records = view1.viewParticipantData.tryUnwrap.externalCallResults
 
               records should have size 2
               records.map(_.result) shouldBe Seq(externalCallResult, externalCallResult)
@@ -276,9 +291,9 @@ final class NextGenTransactionTreeFactoryTest
               val parentView = tree.rootViews.unblindedElements.drop(1).headOption.value
               val childView = parentView.subviews.unblindedElements.headOption.value
 
-              parentView.viewParticipantData.tryUnwrap.externalCallResults shouldBe ImmArray.Empty
+              parentView.viewParticipantData.tryUnwrap.externalCallResults shouldBe Seq.empty
               val record =
-                childView.viewParticipantData.tryUnwrap.externalCallResults.toSeq.loneElement
+                childView.viewParticipantData.tryUnwrap.externalCallResults.loneElement
 
               record.result shouldBe externalCallResult
               record.exerciseIndex shouldBe NonNegativeInt.zero
@@ -310,14 +325,14 @@ final class NextGenTransactionTreeFactoryTest
               val childView = parentView.subviews.unblindedElements.loneElement
 
               val parentRecord =
-                parentView.viewParticipantData.tryUnwrap.externalCallResults.toSeq.loneElement
+                parentView.viewParticipantData.tryUnwrap.externalCallResults.loneElement
               parentRecord.result shouldBe externalCallResult
               parentRecord.exerciseIndex shouldBe NonNegativeInt.tryCreate(1)
               parentRecord.callIndex shouldBe NonNegativeInt.zero
               parentRecord.checkingParties shouldBe Set(ExampleTransactionFactory.submitter)
 
               val childRecord =
-                childView.viewParticipantData.tryUnwrap.externalCallResults.toSeq.loneElement
+                childView.viewParticipantData.tryUnwrap.externalCallResults.loneElement
               childRecord.result shouldBe externalCallResult
               childRecord.exerciseIndex shouldBe NonNegativeInt.zero
               childRecord.callIndex shouldBe NonNegativeInt.zero
@@ -340,7 +355,7 @@ final class NextGenTransactionTreeFactoryTest
               val tree = result.value
               val view = tree.rootViews.unblindedElements.loneElement
               val record =
-                view.viewParticipantData.tryUnwrap.externalCallResults.toSeq.loneElement
+                view.viewParticipantData.tryUnwrap.externalCallResults.loneElement
 
               record.checkingParties shouldBe Set(
                 ExampleTransactionFactory.signatory,
@@ -383,7 +398,7 @@ final class NextGenTransactionTreeFactoryTest
                   transactionUuid = factory.transactionUuid,
                   topologySnapshot = factory.topologySnapshot,
                   contractOfId = successfulLookup(example),
-                  rbContext = RollbackContext.empty,
+                  rbContext = rollbackContextFactory.empty,
                   absolutizer = factory.absolutizer(tree.updateId),
                 )
                 .failOnShutdown
@@ -391,7 +406,7 @@ final class NextGenTransactionTreeFactoryTest
                 .map { reconstruction =>
                   val (reconstructedView, _) = reconstruction.value
                   val record =
-                    reconstructedView.viewParticipantData.tryUnwrap.externalCallResults.toSeq.loneElement
+                    reconstructedView.viewParticipantData.tryUnwrap.externalCallResults.loneElement
 
                   reconstructedView shouldBe submittedView
                   record.exerciseIndex shouldBe NonNegativeInt.tryCreate(1)
@@ -516,12 +531,12 @@ final class NextGenTransactionTreeFactoryTest
                 transactionUuid = factory.transactionUuid,
                 topologySnapshot = factory.topologySnapshot,
                 contractOfId = cid => EitherT.leftT(ContractLookupError(cid, "")),
-                rbContext = RollbackContext.empty.enterRollback,
+                rbContext = rolledBackContext,
                 absolutizer = factory.absolutizer(UpdateId(TestHash.digest(1))),
               )
               .value
               .map { result =>
-                inside(result) { case Left(RolledBackEffect(_, actual)) =>
+                inside(result) { case Left(RolledBackEffect(actual)) =>
                   actual shouldBe expected
                 }
               }

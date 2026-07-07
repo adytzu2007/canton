@@ -5,9 +5,9 @@ package com.digitalasset.daml.lf
 package crypto
 
 import com.daml.crypto.{MacPrototype, MessageDigestPrototype}
-
-import java.nio.ByteBuffer
-import java.util.concurrent.atomic.AtomicLong
+import com.daml.scalautil.Statement.discard
+import com.digitalasset.daml.lf.crypto.HashUtils.{HashTracer, formatByteToHexString}
+import com.digitalasset.daml.lf.data.Ref.Name
 import com.digitalasset.daml.lf.data.{
   Bytes,
   FrontStack,
@@ -17,20 +17,18 @@ import com.digitalasset.daml.lf.data.{
   Time,
   Utf8,
 }
-import com.digitalasset.daml.lf.value.Value
-import com.daml.scalautil.Statement.discard
-import com.digitalasset.daml.lf.crypto.HashUtils.{HashTracer, formatByteToHexString}
-import com.digitalasset.daml.lf.data.Ref.Name
 import com.digitalasset.daml.lf.transaction.*
+import com.digitalasset.daml.lf.value.Value
 import com.digitalasset.daml.lf.value.Value.ContractId
-import scalaz.Order
 
+import java.nio.ByteBuffer
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import scala.collection.immutable.{SortedMap, SortedSet}
-import scala.util.{Failure, Success, Try}
 import scala.util.control.NoStackTrace
+import scala.util.{Failure, Success, Try}
 
 final class Hash private (val bytes: Bytes) {
 
@@ -133,8 +131,6 @@ object Hash {
 
   implicit val ordering: Ordering[Hash] =
     Ordering.by(_.bytes)
-
-  implicit val order: Order[Hash] = Order.fromScalaOrdering
 
   private[lf] val aCid2Bytes: Value.ContractId => Bytes =
     cid => cid.toBytes
@@ -538,7 +534,7 @@ object Hash {
         addExerciseNode(nodes, nodeSeed, nodeSeeds)(exercise)
       case (_: Node.Exercise, None) => missingNodeSeed(node)
       case (rollback: Node.Rollback, _) => addRollbackNode(nodes, nodeSeeds)(rollback)
-      case (_: Node.LookupByKey, _) =>
+      case (_: Node.QueryByKey, _) =>
         notSupported(s"LookupByKey node")
     }
 
@@ -1004,10 +1000,10 @@ object Hash {
   // 2 - `key` is a value of type τ
   @throws[HashingError]
   def assertHashContractKeyUnsafe(
-                             templateId: Ref.Identifier,
-                             packageName: Ref.PackageName,
-                             key: Value,
-                           ): Hash = {
+      templateId: Ref.Identifier,
+      packageName: Ref.PackageName,
+      key: Value,
+  ): Hash = {
     val hashBuilder = builder(Purpose.LegacyContractKey, noCid2String, upgradeFriendlyUnsafe = true)
     hashBuilder
       .addQualifiedName(templateId.qualifiedName)
@@ -1017,10 +1013,10 @@ object Hash {
   }
 
   def hashContractKeyUnsafe(
-                       templateId: Ref.Identifier,
-                       packageName: Ref.PackageName,
-                       key: Value,
-                     ): Either[HashingError, Hash] =
+      templateId: Ref.Identifier,
+      packageName: Ref.PackageName,
+      key: Value,
+  ): Either[HashingError, Hash] =
     handleError(assertHashContractKeyUnsafe(templateId, packageName: Ref.PackageName, key))
 
   // This function assumes that `arg` is well typed, i.e. :

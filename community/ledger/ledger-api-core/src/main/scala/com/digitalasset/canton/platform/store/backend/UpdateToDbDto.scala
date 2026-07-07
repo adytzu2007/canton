@@ -6,6 +6,7 @@ package com.digitalasset.canton.platform.store.backend
 import com.daml.metrics.api.MetricsContext
 import com.daml.metrics.api.MetricsContext.{withExtraMetricLabels, withOptionalMetricLabels}
 import com.daml.platform.v1.index.StatusDetails
+import com.digitalasset.canton.crypto.Hash
 import com.digitalasset.canton.data.DeduplicationPeriod.{DeduplicationDuration, DeduplicationOffset}
 import com.digitalasset.canton.data.Offset
 import com.digitalasset.canton.ledger.participant.state.Update.TopologyTransactionEffective.{
@@ -93,8 +94,13 @@ object UpdateToDbDto {
       case _: CommitRepair =>
         Iterator.empty
 
-      case _: ReceivedAcsCommitment =>
-        Iterator.empty // TODO(#33232): fix
+      case u: ReceivedAcsCommitment =>
+        receivedAcsCommitmentToDbDto(
+          metrics = metrics,
+          offset = offset,
+          serializedTraceContext = serializedTraceContext,
+          receivedAcsCommitment = u,
+        )
     }
   }
 
@@ -132,6 +138,7 @@ object UpdateToDbDto {
         messageUuid = messageUuid,
         serializedTraceContext = serializedTraceContext,
         isTransaction = isTransaction,
+        transactionHash = commandRejected.transactionHash,
       ).copy(
         rejection_status_code = Some(commandRejected.reasonTemplate.code),
         rejection_status_message = Some(commandRejected.reasonTemplate.message),
@@ -162,6 +169,7 @@ object UpdateToDbDto {
       synchronizer_id = topologyTransaction.synchronizerId,
       event_sequential_id_first = 0, // this is filled later
       event_sequential_id_last = 0, // this is filled later
+      transaction_hash = None,
     )
 
     val events = topologyTransaction.events.iterator.flatMap {
@@ -207,6 +215,45 @@ object UpdateToDbDto {
     events ++ Seq(transactionMeta)
   }
 
+  private def receivedAcsCommitmentToDbDto(
+      metrics: LedgerApiServerMetrics,
+      receivedAcsCommitment: ReceivedAcsCommitment,
+      offset: Offset,
+      serializedTraceContext: Array[Byte],
+  )(implicit mc: MetricsContext): Iterator[DbDto] = {
+    incrementCounterForEvent(
+      metrics.indexer,
+      IndexerMetrics.Labels.eventType.acsCommitment,
+      IndexerMetrics.Labels.status.accepted,
+    )
+
+    val updateId = receivedAcsCommitment.updateId.toProtoPrimitive.toByteArray
+
+    val transactionMeta = DbDto.TransactionMeta(
+      update_id = updateId,
+      event_offset = offset.unwrap,
+      publication_time = 0, // this is filled later
+      record_time = receivedAcsCommitment.recordTime.toMicros,
+      synchronizer_id = receivedAcsCommitment.synchronizerId,
+      event_sequential_id_first = 0, // this is filled later
+      event_sequential_id_last = 0, // this is filled later
+      transaction_hash = None,
+    )
+
+    val acsCommitment =
+      DbDto.AcsCommitment(
+        event_sequential_id = 0, // this is filled later
+        event_offset = offset.unwrap,
+        update_id = updateId,
+        synchronizer_id = receivedAcsCommitment.synchronizerId,
+        record_time = receivedAcsCommitment.recordTime.toMicros,
+        payload = receivedAcsCommitment.payload.toByteArray,
+        trace_context = serializedTraceContext,
+      )
+
+    Iterator(acsCommitment, transactionMeta)
+  }
+
   private def transactionAcceptedToDbDto(
       translation: LfValueSerialization,
       compressionStrategy: CompressionStrategy,
@@ -235,6 +282,7 @@ object UpdateToDbDto {
       synchronizer_id = transactionAccepted.synchronizerId,
       event_sequential_id_first = 0, // this is filled later
       event_sequential_id_last = 0, // this is filled later
+      transaction_hash = transactionAccepted.transactionHash.map(_.unwrap.toByteArray),
     )
 
     val events: Iterator[DbDto] = transactionAccepted.transactionInfo.executionOrder.iterator
@@ -276,6 +324,7 @@ object UpdateToDbDto {
         messageUuid = None,
         serializedTraceContext = serializedTraceContext,
         isTransaction = true,
+        transactionHash = transactionAccepted.transactionHash,
       )
 
     // TransactionMeta DTO must come last in this sequence
@@ -332,8 +381,7 @@ object UpdateToDbDto {
         record_time = transactionAccepted.recordTime.toMicros,
         synchronizer_id = transactionAccepted.synchronizerId,
         trace_context = serializedTraceContext,
-        external_transaction_hash =
-          transactionAccepted.externalTransactionHash.map(_.unwrap.toByteArray),
+        external_transaction_hash = transactionAccepted.transactionHash.map(_.unwrap.toByteArray),
         traffic_cost = transactionAccepted.paidTrafficCost.map(_.value),
         event_sequential_id = 0, // this is filled later
         node_id = nodeId.index,
@@ -357,8 +405,7 @@ object UpdateToDbDto {
         record_time = transactionAccepted.recordTime.toMicros,
         synchronizer_id = transactionAccepted.synchronizerId,
         trace_context = serializedTraceContext,
-        external_transaction_hash =
-          transactionAccepted.externalTransactionHash.map(_.unwrap.toByteArray),
+        external_transaction_hash = transactionAccepted.transactionHash.map(_.unwrap.toByteArray),
         traffic_cost = transactionAccepted.paidTrafficCost.map(_.value),
         event_sequential_id = 0, // this is filled later
         node_id = nodeId.index,
@@ -395,8 +442,7 @@ object UpdateToDbDto {
         record_time = transactionAccepted.recordTime.toMicros,
         synchronizer_id = transactionAccepted.synchronizerId,
         trace_context = serializedTraceContext,
-        external_transaction_hash =
-          transactionAccepted.externalTransactionHash.map(_.unwrap.toByteArray),
+        external_transaction_hash = transactionAccepted.transactionHash.map(_.unwrap.toByteArray),
         traffic_cost = transactionAccepted.paidTrafficCost.map(_.value),
         event_sequential_id = 0, // this is filled later
         node_id = nodeId.index,
@@ -445,8 +491,7 @@ object UpdateToDbDto {
         record_time = transactionAccepted.recordTime.toMicros,
         synchronizer_id = transactionAccepted.synchronizerId,
         trace_context = serializedTraceContext,
-        external_transaction_hash =
-          transactionAccepted.externalTransactionHash.map(_.unwrap.toByteArray),
+        external_transaction_hash = transactionAccepted.transactionHash.map(_.unwrap.toByteArray),
         traffic_cost = transactionAccepted.paidTrafficCost.map(_.value),
         event_sequential_id = 0, // this is filled later
         node_id = nodeId.index,
@@ -517,6 +562,7 @@ object UpdateToDbDto {
         messageUuid = None,
         serializedTraceContext = serializedTraceContext,
         isTransaction = false,
+        transactionHash = None,
       )
 
     val transactionMeta = DbDto.TransactionMeta(
@@ -527,6 +573,7 @@ object UpdateToDbDto {
       synchronizer_id = reassignmentAccepted.synchronizerId,
       event_sequential_id_first = 0, // this is filled later
       event_sequential_id_last = 0, // this is filled later
+      transaction_hash = None,
     )
 
     // TransactionMeta DTO must come last in this sequence
@@ -621,6 +668,7 @@ object UpdateToDbDto {
       messageUuid: Option[UUID],
       isTransaction: Boolean,
       serializedTraceContext: Array[Byte],
+      transactionHash: Option[Hash],
   ): DbDto.CommandCompletion = {
     val (deduplicationOffset, deduplicationDurationSeconds, deduplicationDurationNanos) =
       completionInfo.optDeduplicationPeriod
@@ -656,6 +704,7 @@ object UpdateToDbDto {
       is_transaction = isTransaction,
       trace_context = serializedTraceContext,
       traffic_cost = completionInfo.paidTrafficCost.value,
+      transaction_hash = transactionHash.map(_.unwrap.toByteArray),
     )
   }
 }

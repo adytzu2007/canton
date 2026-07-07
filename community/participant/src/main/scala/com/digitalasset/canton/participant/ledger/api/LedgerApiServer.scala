@@ -6,11 +6,8 @@ package com.digitalasset.canton.participant.ledger.api
 import cats.Eval
 import com.daml.executors.InstrumentedExecutors
 import com.daml.ledger.api.v2.experimental_features.ExperimentalCommandInspectionService
-import com.daml.ledger.api.v2.state_service.GetActiveContractsResponse
-import com.daml.ledger.api.v2.topology_transaction.TopologyTransaction
 import com.daml.ledger.api.v2.version_service.OffsetCheckpointFeature
 import com.daml.ledger.resources.ResourceOwner
-import com.daml.logging.entries.LoggingEntries
 import com.digitalasset.canton.auth.*
 import com.digitalasset.canton.concurrent.ExecutionContextIdlenessExecutorService
 import com.digitalasset.canton.config.CantonRequireTypes.InstanceName
@@ -18,27 +15,17 @@ import com.digitalasset.canton.config.NonNegativeDurationConverter.NonNegativeDu
 import com.digitalasset.canton.config.{AdminTokenConfig, ApiLoggingConfig, ProcessingTimeout}
 import com.digitalasset.canton.connection.GrpcApiInfoService
 import com.digitalasset.canton.connection.v30.ApiInfoServiceGrpc
-import com.digitalasset.canton.data.Offset
 import com.digitalasset.canton.health.HealthChecks
 import com.digitalasset.canton.http.metrics.HttpApiMetrics
 import com.digitalasset.canton.http.{HttpApiServer, JsonApiConfig}
 import com.digitalasset.canton.interactive.InteractiveSubmissionEnricher
-import com.digitalasset.canton.ledger.api.messages.state.AcsRangeInfo
 import com.digitalasset.canton.ledger.api.util.TimeProvider
-import com.digitalasset.canton.ledger.api.{
-  CumulativeFilter,
-  EventFormat,
-  IdentityProviderId,
-  ParticipantAuthorizationFormat,
-  TopologyFormat,
-  UpdateFormat,
-  User,
-  UserRight,
-}
 import com.digitalasset.canton.ledger.localstore.*
-import com.digitalasset.canton.ledger.localstore.api.UserManagementStore
 import com.digitalasset.canton.ledger.participant.state.metrics.TimedSyncService
-import com.digitalasset.canton.ledger.participant.state.{InternalIndexService, PackageSyncService}
+import com.digitalasset.canton.ledger.participant.state.{
+  InternalIndexServiceImpl,
+  PackageSyncService,
+}
 import com.digitalasset.canton.lifecycle.*
 import com.digitalasset.canton.lifecycle.LifeCycle.FastCloseableChannel
 import com.digitalasset.canton.logging.pretty.{Pretty, PrettyPrinting}
@@ -52,6 +39,10 @@ import com.digitalasset.canton.participant.config.{
   ParticipantStoreConfig,
   TestingTimeServiceConfig,
 }
+import com.digitalasset.canton.participant.extension.{
+  ExtensionServiceExternalCallHandler,
+  ExtensionServiceManager,
+}
 import com.digitalasset.canton.participant.store.ParticipantNodePersistentState
 import com.digitalasset.canton.participant.sync.CantonSyncService
 import com.digitalasset.canton.participant.{
@@ -62,6 +53,7 @@ import com.digitalasset.canton.platform.apiserver.execution.CommandProgressTrack
 import com.digitalasset.canton.platform.apiserver.ratelimiting.RateLimitingInterceptorFactory
 import com.digitalasset.canton.platform.apiserver.services.ApiContractService
 import com.digitalasset.canton.platform.apiserver.services.admin.{PartyReplicationEndpoints, Utils}
+import com.digitalasset.canton.platform.apiserver.services.command.TrafficEnforcementBackend
 import com.digitalasset.canton.platform.apiserver.{
   ApiServiceOwner,
   InProcessGrpcName,
@@ -88,8 +80,9 @@ import com.digitalasset.canton.platform.{
   ResourceOwnerOps,
 }
 import com.digitalasset.canton.time.{Clock, RemoteClock, SimClock}
-import com.digitalasset.canton.topology.SynchronizerId
 import com.digitalasset.canton.tracing.{TraceContext, TraceContextGrpc, TracerProvider}
+import com.digitalasset.canton.user.store.UserManagementStore
+import com.digitalasset.canton.user.{IdentityProviderId, User, UserRight}
 import com.digitalasset.canton.util.ContractValidator
 import com.digitalasset.canton.util.PackageConsumer.PackageResolver
 import com.digitalasset.canton.{LedgerParticipantId, LfPartyId, config}
@@ -100,10 +93,8 @@ import com.digitalasset.daml.lf.language.Ast
 import io.grpc.inprocess.InProcessChannelBuilder
 import io.grpc.{BindableService, ServerInterceptor, ServerServiceDefinition}
 import io.opentelemetry.api.trace.Tracer
-import org.apache.pekko.NotUsed
 import org.apache.pekko.actor.ActorSystem
 import org.apache.pekko.stream.Materializer
-import org.apache.pekko.stream.scaladsl.Source
 
 import scala.concurrent.Future
 
@@ -131,8 +122,10 @@ class LedgerApiServer(
     ledgerApiIndexer: Eval[LedgerApiIndexer],
     pruningConfig: ParticipantStoreConfig,
     updateServiceConfig: UpdateServiceConfig,
+    trafficEnforcementBackendO: Option[Eval[TrafficEnforcementBackend]],
     warnOnJwtScopeUsage: Boolean,
     val loggerFactory: NamedLoggerFactory,
+    extensionServiceManagerO: Option[ExtensionServiceManager],
 )(implicit
     executionContext: ExecutionContextIdlenessExecutorService,
     actorSystem: ActorSystem,
@@ -192,6 +185,7 @@ class LedgerApiServer(
         readTimeout = serverConfig.jwksCacheConfig.readTimeout.underlying,
         jwtTimestampLeeway = serverConfig.jwtTimestampLeeway,
         maxTokenLife = serverConfig.maxTokenLifetime.toMillisOrNone(),
+        autoRefreshAfter = serverConfig.jwksCacheConfig.autoRefreshAfter.underlying,
         metrics = Some(grpcApiMetrics.identityProviderConfigStore.verifierCache),
         loggerFactory = loggerFactory,
       )
@@ -283,72 +277,9 @@ class LedgerApiServer(
         updateServiceConfig = updateServiceConfig,
         scheduler = actorSystem.scheduler,
       )
-      _ = timedSyncService.registerInternalIndexService(new InternalIndexService {
-        override def activeContracts(
-            partyIds: Set[LfPartyId],
-            validAt: Option[Offset],
-        )(implicit traceContext: TraceContext): Source[GetActiveContractsResponse, NotUsed] =
-          indexService
-            .getActiveContracts(
-              eventFormat = EventFormat(
-                filtersByParty =
-                  partyIds.view.map(_ -> CumulativeFilter.templateWildcardFilter(true)).toMap,
-                filtersForAnyParty =
-                  Option.when(partyIds.isEmpty)(CumulativeFilter.templateWildcardFilter(true)),
-                verbose = false,
-              ),
-              activeAt = validAt,
-              rangeInfo = AcsRangeInfo.empty,
-            )(new LoggingContextWithTrace(LoggingEntries.empty, traceContext))
-
-        override def topologyTransactions(
-            partyId: LfPartyId,
-            fromExclusive: Offset,
-        )(implicit traceContext: TraceContext): Source[TopologyTransaction, NotUsed] =
-          indexService
-            .updates(
-              begin = Some(fromExclusive),
-              endAt = None,
-              updateFormat = UpdateFormat(
-                includeTransactions = None,
-                includeReassignments = None,
-                includeTopologyEvents = Some(
-                  TopologyFormat(
-                    participantAuthorizationFormat = Some(
-                      ParticipantAuthorizationFormat(
-                        parties = Some(Set(partyId))
-                      )
-                    )
-                  )
-                ),
-              ),
-              descendingOrder = false,
-              skipPruningChecks = false,
-            )
-            .mapConcat(_.update.topologyTransaction)
-
-        override def acsUpdates(synchronizerId: SynchronizerId, fromExclusive: Offset)(implicit
-            traceContext: TraceContext
-        ): Source[InternalIndexService.AcsUpdateContainer, NotUsed] =
-          throw new UnsupportedOperationException() // TODO(#33232): Implement
-
-        override def acs(
-            synchronizerId: SynchronizerId,
-            activeAt: Offset,
-            stakeholders1: Set[Party],
-            stakeholders2: Set[Party],
-        )(implicit
-            traceContext: TraceContext
-        ): Source[InternalIndexService.ActiveContract, NotUsed] =
-          throw new UnsupportedOperationException() // TODO(#33232): Implement
-
-        override def counterParties(
-            synchronizerId: SynchronizerId,
-            activeAt: Offset,
-            party: Option[Party],
-        ): Source[LfPartyId, NotUsed] =
-          throw new UnsupportedOperationException() // TODO(#33232): Implement
-      })
+      _ = timedSyncService.registerInternalIndexService(
+        new InternalIndexServiceImpl(indexService)
+      )
       userManagementStore = getUserManagementStore(dbSupport, loggerFactory)
       partyRecordStore = new PersistentPartyRecordStore(
         dbSupport = dbSupport,
@@ -387,6 +318,7 @@ class LedgerApiServer(
         lfValueTranslation = lfValueTranslation,
         loggerFactory = loggerFactory,
       )
+      externalCallHandler = ExtensionServiceExternalCallHandler.create(extensionServiceManagerO)
       (_, authInterceptor) <- ApiServiceOwner(
         indexService = indexService,
         transactionSubmissionTracker = inMemoryState.transactionSubmissionTracker,
@@ -414,7 +346,6 @@ class LedgerApiServer(
         maxInboundMetadataSize = serverConfig.maxInboundMetadataSize.unwrap,
         maxConcurrentCallsPerConnection = serverConfig.maxConcurrentCallsPerConnection.unwrap,
         port = serverConfig.port,
-        seeding = cantonParameterConfig.ledgerApiServerParameters.contractIdSeeding,
         syncService = timedSyncService,
         partyReplicationEndpointsO = partyReplicationEndpointsO,
         healthChecks = new HealthChecks(
@@ -447,6 +378,8 @@ class LedgerApiServer(
         apiLoggingConfig = cantonParameterConfig.loggingConfig.api,
         apiContractService = apiContractService,
         safeToPruneCommitmentState = pruningConfig.safeToPruneCommitmentState,
+        trafficEnforcementBackendO = trafficEnforcementBackendO,
+        externalCallHandler = externalCallHandler,
       )
       _ <- startHttpApiIfEnabled(
         timedSyncService,
@@ -610,10 +543,12 @@ object LedgerApiServer {
       participantNodePersistentState: Eval[ParticipantNodePersistentState],
       sync: CantonSyncService,
       partyReplicationEndpointsO: Option[PartyReplicationEndpoints],
+      trafficEnforcementBackendO: Option[Eval[TrafficEnforcementBackend]],
       pruningConfig: ParticipantStoreConfig,
       tracerProvider: TracerProvider,
       updateServiceConfig: UpdateServiceConfig,
       warnOnJwtScopeUsage: Boolean,
+      extensionServiceManagerO: Option[ExtensionServiceManager],
   )(implicit
       actorSystem: ActorSystem,
       executionContext: ExecutionContextIdlenessExecutorService,
@@ -668,7 +603,9 @@ object LedgerApiServer {
       loggerFactory = loggerFactory,
       pruningConfig = pruningConfig,
       updateServiceConfig = updateServiceConfig,
+      trafficEnforcementBackendO = trafficEnforcementBackendO,
       warnOnJwtScopeUsage = warnOnJwtScopeUsage,
+      extensionServiceManagerO = extensionServiceManagerO,
     ).owner()
     new ResourceOwnerFlagCloseableOps(ledgerApiServerOwner)
       .acquireFlagCloseable("Ledger API Server")

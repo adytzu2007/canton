@@ -35,7 +35,7 @@ import com.digitalasset.canton.logging.{
   NamedLogging,
 }
 import com.digitalasset.canton.participant.ParticipantNode
-import com.digitalasset.canton.platform.apiserver.SeedService.WeakRandom
+import com.digitalasset.canton.platform.apiserver.SubmissionSeed
 import com.digitalasset.canton.protocol.*
 import com.digitalasset.canton.time.NonNegativeFiniteDuration
 import com.digitalasset.canton.topology.{ParticipantId, PartyId}
@@ -44,6 +44,7 @@ import com.digitalasset.canton.util.PackageConsumer.PackageResolver
 import com.digitalasset.canton.util.TryUtil
 import com.digitalasset.daml.lf.command.ApiCommands
 import com.digitalasset.daml.lf.crypto
+import com.digitalasset.daml.lf.crypto.Hash
 import com.digitalasset.daml.lf.data.Ref.{CommandId, SubmissionId, UserId, WorkflowId}
 import com.digitalasset.daml.lf.data.{ImmArray, Ref, Time}
 import com.digitalasset.daml.lf.engine.ResultNeedContract.Response
@@ -289,7 +290,7 @@ class TestSubmissionService(
       readAs: Seq[PartyId],
       disclosedContracts: Map[LfContractId, FatContractInstance],
       disclosedKeyContracts: Map[GlobalKey, Vector[FatContractInstance]],
-      submissionSeed: crypto.Hash = WeakRandom.nextSeed(),
+      submissionSeed: crypto.Hash = SubmissionSeed.generate(randomOps),
       packageMapOverride: Option[
         Map[Ref.PackageId, (Ref.PackageName, Ref.PackageVersion)]
       ] = None,
@@ -399,7 +400,23 @@ class TestSubmissionService(
           hasStarted: NeedKeyProgression.HasStarted =
             if (rest.nonEmpty) NeedKeyProgression.InProgress(ContinuationToken(rest))
             else NeedKeyProgression.Finished
-          r <- resolve(disclosedContracts, disclosedKeyContracts, resume(result, hasStarted))
+          r <- resolve(
+            disclosedContracts,
+            disclosedKeyContracts,
+            resume(
+              ResultNeedKey.Response(
+                result
+                  .map(fci =>
+                    ResultNeedKey.Response.AuthenticableFatContractInstance(
+                      fci,
+                      Hash.HashingMethod.TypedNormalForm,
+                      _ => true,
+                    )
+                  ),
+                hasStarted,
+              )
+            ),
+          )
         } yield r
 
       case ResultInterruption(continue, _) =>
@@ -627,7 +644,7 @@ object TestSubmissionService {
       submissionId: String = UUID.randomUUID().toString,
       deduplicationPeriodO: Option[DeduplicationPeriod] = None,
       ledgerTime: Time.Timestamp = Time.Timestamp.now(),
-      submissionSeed: crypto.Hash = WeakRandom.nextSeed(),
+      submissionSeed: crypto.Hash = SubmissionSeed.generate(randomOps),
       transactionSeed: SaltSeed = SaltSeed.generate()(randomOps),
       transactionUuid: UUID = UUID.randomUUID(),
       packageMapOverride: Option[Map[Ref.PackageId, (Ref.PackageName, Ref.PackageVersion)]] = None,
@@ -664,6 +681,7 @@ object TestSubmissionService {
         deduplicationPeriod,
         SubmissionId.fromString(submissionId).toOption,
         externallySignedSubmission = None,
+        transactionHash = None,
       )
     }
 

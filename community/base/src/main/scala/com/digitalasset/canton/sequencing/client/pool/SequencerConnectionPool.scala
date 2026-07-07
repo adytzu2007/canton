@@ -6,7 +6,7 @@ package com.digitalasset.canton.sequencing.client.pool
 import cats.data.EitherT
 import cats.syntax.either.*
 import com.daml.grpc.adapter.ExecutionSequencerFactory
-import com.daml.nonempty.NonEmpty
+import com.daml.metrics.api.MetricsContext
 import com.digitalasset.canton.SequencerAlias
 import com.digitalasset.canton.config.RequireTypes.{NonNegativeInt, PositiveInt}
 import com.digitalasset.canton.health.{
@@ -31,6 +31,7 @@ import com.digitalasset.canton.topology.client.TopologySnapshot
 import com.digitalasset.canton.topology.{PhysicalSynchronizerId, SequencerId}
 import com.digitalasset.canton.tracing.{TraceContext, TracingConfig}
 import com.digitalasset.canton.util.MonadUtil
+import com.digitalasset.nonempty.NonEmpty
 import com.google.common.annotations.VisibleForTesting
 import org.apache.pekko.stream.Materializer
 
@@ -144,6 +145,9 @@ trait SequencerConnectionPool extends FlagCloseable with NamedLogging {
 
   /** Obtain all the sequencer IDs present in the pool, associated to their sequencer alias */
   def getAllSequencerIds(implicit traceContext: TraceContext): Map[SequencerAlias, SequencerId]
+
+  /** The context for the pool metrics */
+  def metricsContext: MetricsContext
 
   /** Determine whether the connection pool can still reach the given threshold, ignoring the
     * `ignored` connections and considering an additional `extraUndecided` number of undecided

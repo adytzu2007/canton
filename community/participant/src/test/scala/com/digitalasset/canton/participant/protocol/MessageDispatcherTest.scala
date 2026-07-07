@@ -4,7 +4,6 @@
 package com.digitalasset.canton.participant.protocol
 
 import cats.syntax.option.*
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.config.RequireTypes.{NonNegativeLong, PositiveInt}
 import com.digitalasset.canton.crypto.provider.symbolic.SymbolicCrypto
 import com.digitalasset.canton.crypto.{
@@ -64,6 +63,7 @@ import com.digitalasset.canton.util.ShowUtil.*
 import com.digitalasset.canton.util.{ErrorUtil, MonadUtil}
 import com.digitalasset.canton.version.*
 import com.digitalasset.canton.{BaseTest, HasExecutorService, RequestCounter, SequencerCounter}
+import com.digitalasset.nonempty.NonEmpty
 import com.google.protobuf.ByteString
 import org.mockito.ArgumentMatchers.eq as isEq
 import org.scalatest.Assertion
@@ -191,7 +191,7 @@ trait MessageDispatcherTest {
       when(
         acsCommitmentProcessor.apply(
           any[CantonTimestamp],
-          any[Traced[List[OpenEnvelope[SignedProtocolMessage[AcsCommitment]]]]],
+          any[Traced[List[OpenEnvelope[SignedProtocolMessage[LegacyAcsCommitment]]]]],
         )
       )
         .thenReturn(HandlerResult.done)
@@ -388,10 +388,10 @@ trait MessageDispatcherTest {
       List(factory.ns1k1_k1),
     )
 
-    val rawCommitment = mock[AcsCommitment]
+    val rawCommitment = mock[LegacyAcsCommitment]
     when(rawCommitment.psid).thenReturn(psid)
     when(rawCommitment.representativeProtocolVersion).thenReturn(
-      AcsCommitment.protocolVersionRepresentativeFor(testedProtocolVersion)
+      LegacyAcsCommitment.protocolVersionRepresentativeFor(testedProtocolVersion)
     )
     when(rawCommitment.pretty).thenReturn(PrettyUtil.prettyOfString(_ => "test"))
 
@@ -631,7 +631,10 @@ trait MessageDispatcherTest {
         )
         handle(sut, sc, event) {
           verify(sut.acsCommitmentProcessor)
-            .apply(isEq(ts), any[Traced[List[OpenEnvelope[SignedProtocolMessage[AcsCommitment]]]]])
+            .apply(
+              isEq(ts),
+              any[Traced[List[OpenEnvelope[SignedProtocolMessage[LegacyAcsCommitment]]]]],
+            )
           checkTicks(sut, sc, ts)
         }
       }.futureValue
@@ -656,7 +659,7 @@ trait MessageDispatcherTest {
       when(
         sut.acsCommitmentProcessor.apply(
           any[CantonTimestamp],
-          any[Traced[List[OpenEnvelope[SignedProtocolMessage[AcsCommitment]]]]],
+          any[Traced[List[OpenEnvelope[SignedProtocolMessage[LegacyAcsCommitment]]]]],
         )
       )
         .thenReturn(HandlerResult.done)
@@ -673,7 +676,7 @@ trait MessageDispatcherTest {
       verify(sut.acsCommitmentProcessor, never)
         .apply(
           any[CantonTimestamp],
-          any[Traced[List[OpenEnvelope[SignedProtocolMessage[AcsCommitment]]]]],
+          any[Traced[List[OpenEnvelope[SignedProtocolMessage[LegacyAcsCommitment]]]]],
         )
       succeed
     }

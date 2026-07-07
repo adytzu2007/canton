@@ -35,6 +35,7 @@ import com.digitalasset.canton.participant.admin.*
 import com.digitalasset.canton.participant.admin.grpc.*
 import com.digitalasset.canton.participant.admin.party.{PartyReplicationEndpoints, PartyReplicator}
 import com.digitalasset.canton.participant.config.*
+import com.digitalasset.canton.participant.extension.ExtensionServiceManager
 import com.digitalasset.canton.participant.health.admin.ParticipantStatus
 import com.digitalasset.canton.participant.ledger.api.{
   AcsCommitmentPublicationPostProcessor,
@@ -63,14 +64,17 @@ import com.digitalasset.canton.participant.synchronizer.grpc.GrpcSynchronizerReg
 import com.digitalasset.canton.participant.topology.*
 import com.digitalasset.canton.platform.apiserver.execution.CommandProgressTracker
 import com.digitalasset.canton.platform.apiserver.services.admin.PackageUpgradeValidator
+import com.digitalasset.canton.platform.apiserver.services.command.TrafficEnforcementBackend
+import com.digitalasset.canton.platform.config.TrafficEnforcementServerConfig
 import com.digitalasset.canton.platform.store.LedgerApiContractStoreImpl
-import com.digitalasset.canton.platform.store.backend.ParameterStorageBackend
+import com.digitalasset.canton.platform.store.backend.LedgerEnd
 import com.digitalasset.canton.protocol.StaticSynchronizerParameters
 import com.digitalasset.canton.resource.*
 import com.digitalasset.canton.scheduler.{Cron, CronWindowSchedule, Schedulers, SchedulersImpl}
 import com.digitalasset.canton.sequencing.client.{RecordingConfig, ReplayConfig, SequencerClient}
 import com.digitalasset.canton.store.IndexedStringStore
 import com.digitalasset.canton.store.packagemeta.PackageMetadata
+import com.digitalasset.canton.tea.TrafficEnforcementApp
 import com.digitalasset.canton.time.*
 import com.digitalasset.canton.time.admin.v30.SynchronizerTimeServiceGrpc
 import com.digitalasset.canton.topology.*
@@ -217,10 +221,9 @@ class ParticipantNodeBootstrap(
         .map(_.syncPersistentStateManager.getAllLogical.view.mapValues(_.reassignmentStore).toMap)
         .getOrElse(Map.empty)
 
-    def ledgerEnd(): FutureUnlessShutdown[Option[ParameterStorageBackend.LedgerEnd]] =
+    def ledgerEnd(): Option[LedgerEnd] =
       cantonSyncService.get
-        .traverse(_.ledgerApiIndexer.asEval.value.ledgerApiStore.value.ledgerEnd)
-        .map(_.flatten)
+        .flatMap(_.ledgerApiIndexer.asEval.value.ledgerApiStore.value.ledgerEnd)
     val topologyManager = new AuthorizedTopologyManager(
       nodeId,
       clock,
@@ -366,7 +369,6 @@ class ParticipantNodeBootstrap(
         participantId = participantId,
         stateManager = manager,
         topologyLookup = topologyLookup,
-        initialProtocolVersion = ProtocolVersion.latest,
         loggerFactory = ParticipantNodeBootstrap.this.loggerFactory,
         timeouts = timeouts,
         futureSupervisor = futureSupervisor,
@@ -602,6 +604,47 @@ class ParticipantNodeBootstrap(
           loggerFactory,
         )
 
+        // Traffic enforcement component containers
+        trafficEnforcementComponentContainersO = Option.when(config.trafficEnforcement.enabled)(
+          config.trafficEnforcement.trafficEnforcementServer match {
+            case internalServerConfig: TrafficEnforcementServerConfig.Internal =>
+              val trafficEnforcementAppContainer = new LifeCycleContainer(
+                stateName = "traffic-enforcement-app",
+                create = () =>
+                  FutureUnlessShutdown.pure(
+                    TrafficEnforcementApp(
+                      storage = storage,
+                      config = internalServerConfig,
+                      loggerFactory = loggerFactory,
+                      timeouts = timeouts,
+                      clock = clock,
+                    )
+                  ),
+                loggerFactory = loggerFactory,
+              )
+              val trafficEnforcementBackendContainer = new LifeCycleContainer(
+                stateName = "traffic-enforcement-backend",
+                create = () =>
+                  FutureUnlessShutdown.pure(
+                    TrafficEnforcementBackend(
+                      trafficEnforcementServerConfig =
+                        config.trafficEnforcement.trafficEnforcementServer,
+                      processingTimeout = timeouts,
+                      loggerFactory = loggerFactory,
+                    )
+                  ),
+                loggerFactory = loggerFactory,
+              )
+
+              trafficEnforcementAppContainer -> trafficEnforcementBackendContainer
+          }
+        )
+
+        (trafficEnforcementAppContainerO, trafficEnforcementBackendContainerO) =
+          trafficEnforcementComponentContainersO.unzip
+
+        trafficEnforcementBackendO = trafficEnforcementBackendContainerO.map(_.asEval)
+
         synchronizerRegistry = new GrpcSynchronizerRegistry(
           participantId,
           syncPersistentStateManager,
@@ -677,6 +720,7 @@ class ParticipantNodeBootstrap(
                 chunkSize = purgeCfg.chunkSize,
                 synchronizerConnectionConfigStore,
                 syncPersistentStateManager,
+                parameters.batchingConfig,
                 timeouts,
                 loggerFactory,
               )
@@ -702,6 +746,33 @@ class ParticipantNodeBootstrap(
               }
             )
             .mapK(FutureUnlessShutdown.outcomeK)
+
+        // Create extension service manager early so it can be shared with both CantonSyncService and LedgerApiServer
+        extensionServiceManagerO: Option[ExtensionServiceManager] =
+          Option.when(parameters.engine.extensions.nonEmpty) {
+            val manager = new ExtensionServiceManager(
+              extensionConfigs = parameters.engine.extensions,
+              loggerFactory = loggerFactory,
+              timeouts = timeouts,
+            )
+            logger.info(
+              s"Extension service manager initialized with ${parameters.engine.extensions.size} extension(s): " +
+                s"${parameters.engine.extensions.keys.mkString(", ")}"
+            )
+            manager
+          }
+
+        // Register before startup validation so failures close the manager's lifecycle context.
+        // The manager is shared by sync and the Ledger API; registering it before consumers keeps
+        // reverse close order closing consumers first.
+        _ = extensionServiceManagerO.foreach(addCloseable)
+
+        _ <- EitherT(
+          extensionServiceManagerO
+            .fold(FutureUnlessShutdown.pure[Either[String, Unit]](Right(())))(
+              _.initializeOnStartup()
+            )
+        )
 
         // Sync Service
         sync = CantonSyncService.create(
@@ -732,6 +803,7 @@ class ParticipantNodeBootstrap(
           ledgerApiIndexerContainer,
           connectedSynchronizersLookupContainer,
           () => triggerDeclarativeChange(),
+          trafficEnforcementBackendO,
         )
 
         _ <-
@@ -809,10 +881,12 @@ class ParticipantNodeBootstrap(
                     parameters.processingTimeouts,
                   )
                 ),
+                trafficEnforcementBackendO = trafficEnforcementBackendO,
                 pruningConfig = parameters.stores,
                 tracerProvider = tracerProvider,
                 updateServiceConfig = arguments.config.ledgerApi.updateService,
                 warnOnJwtScopeUsage = arguments.testingConfig.warnOnJwtScopeUsage,
+                extensionServiceManagerO = extensionServiceManagerO,
               )
             ),
           loggerFactory = loggerFactory,
@@ -822,6 +896,21 @@ class ParticipantNodeBootstrap(
           if (sync.isActive()) EitherT.right[String](ledgerApiServerContainer.initializeNext())
           else EitherT.right[String](FutureUnlessShutdown.unit)
 
+        // Initialize the traffic enforcement components if traffic enforcement is enabled and if the participant is active
+        _ <- trafficEnforcementComponentContainersO.traverseTap {
+          case (trafficEnforcementAppContainer, trafficEnforcementBackendContainer) =>
+            // only start the traffic enforcement components if participant is becoming active
+            if (isActive) {
+              EitherT.right[String](for {
+                _ <- trafficEnforcementAppContainer.initializeNext()
+                // The traffic enforcement backend is initialized after the app to ensure the Ledger APIs requests can be served when started
+                _ <- trafficEnforcementBackendContainer.initializeNext()
+              } yield ())
+            } else {
+              logger.info("Traffic enforcement app is not started due to inactive state")
+              EitherT.rightT[FutureUnlessShutdown, String](())
+            }
+        }
       } yield {
         val ledgerApiDependentServices =
           new StartableStoppableLedgerApiDependentServices(
@@ -931,6 +1020,16 @@ class ParticipantNodeBootstrap(
         addCloseable(ledgerApiServerContainer.currentAutoCloseable())
         addCloseable(ledgerApiDependentServices)
         addCloseable(mutablePackageMetadataView)
+        // Health components owned by the bootstrap, not closed by the health service.
+        addCloseable(connectedSynchronizerHealth)
+        addCloseable(connectedSynchronizerEphemeralHealth)
+        addCloseable(connectedSynchronizerSequencerClientHealth)
+        addCloseable(connectedSynchronizerAcsCommitmentProcessorHealth)
+        trafficEnforcementComponentContainersO.foreach {
+          case (trafficEnforcementAppContainer, trafficEnforcementBackendContainer) =>
+            addCloseable(trafficEnforcementAppContainer.currentAutoCloseable())
+            addCloseable(trafficEnforcementBackendContainer.currentAutoCloseable())
+        }
 
         // return values
         ParticipantServices(
@@ -943,6 +1042,8 @@ class ParticipantNodeBootstrap(
           ledgerApiServerContainer = ledgerApiServerContainer,
           startableStoppableLedgerApiDependentServices = ledgerApiDependentServices,
           participantTopologyDispatcher = topologyDispatcher,
+          trafficEnforcementBackendContainerO = trafficEnforcementBackendContainerO,
+          trafficEnforcementAppContainerO = trafficEnforcementAppContainerO,
         )
       }
     }
@@ -1029,6 +1130,10 @@ object ParticipantNodeBootstrap {
       persistentStateContainer: LifeCycleContainer[ParticipantNodePersistentState],
       mutablePackageMetadataView: MutablePackageMetadataViewImpl,
       ledgerApiIndexerContainer: LifeCycleContainer[LedgerApiIndexer],
+      // None if traffic enforcement is disabled
+      trafficEnforcementBackendContainerO: Option[LifeCycleContainer[TrafficEnforcementBackend]],
+      // None if traffic enforcement is disabled
+      trafficEnforcementAppContainerO: Option[LifeCycleContainer[TrafficEnforcementApp]],
       cantonSyncService: CantonSyncService,
       schedulers: Schedulers,
       partyReplicatorContainerO: Option[LifeCycleContainer[PartyReplicator]],

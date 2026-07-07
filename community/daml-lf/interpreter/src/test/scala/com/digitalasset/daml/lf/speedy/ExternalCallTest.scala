@@ -7,7 +7,7 @@ package speedy
 import com.daml.scalautil.Statement.discard
 import com.digitalasset.canton.logging.SuppressingLogging
 import com.digitalasset.daml.lf.data.{Bytes, ImmArray, Ref}
-import com.digitalasset.daml.lf.interpretation.{Error => IE}
+import com.digitalasset.daml.lf.interpretation.Error as IE
 import com.digitalasset.daml.lf.language.LanguageVersion
 import com.digitalasset.daml.lf.speedy.SExpr.{SEApp, SExpr}
 import com.digitalasset.daml.lf.speedy.SValue.{SParty, SText}
@@ -48,6 +48,10 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
           controllers Cons @Party [M:T {party} this] (Nil @Party)
           to EXTERNAL_CALL "ext" "fun" "0a0b" "c0ff";
 
+        choice CallEmptyPayloads (self) (arg: Unit) : Text,
+          controllers Cons @Party [M:T {party} this] (Nil @Party)
+          to EXTERNAL_CALL "ext" "fun" "" "";
+
         choice CallBadConfig (self) (arg: Unit) : Text,
           controllers Cons @Party [M:T {party} this] (Nil @Party)
           to EXTERNAL_CALL "ext" "fun" "zzzz" "c0ff";
@@ -55,6 +59,10 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
         choice CallBadInput (self) (arg: Unit) : Text,
           controllers Cons @Party [M:T {party} this] (Nil @Party)
           to EXTERNAL_CALL "ext" "fun" "0a0b" "nope";
+
+        choice CallOddLengthInput (self) (arg: Unit) : Text,
+          controllers Cons @Party [M:T {party} this] (Nil @Party)
+          to EXTERNAL_CALL "ext" "fun" "0a0b" "0";
 
         choice CallUppercaseConfig (self) (arg: Unit) : Text,
           controllers Cons @Party [M:T {party} this] (Nil @Party)
@@ -91,6 +99,10 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
         ubind cid: ContractId M:T <- create @M:T M:T { party = party }
         in exercise @M:T Call cid ();
 
+      val runEmptyPayloads : Party -> Update Text = \(party: Party) ->
+        ubind cid: ContractId M:T <- create @M:T M:T { party = party }
+        in exercise @M:T CallEmptyPayloads cid ();
+
       val runBadConfig : Party -> Update Text = \(party: Party) ->
         ubind cid: ContractId M:T <- create @M:T M:T { party = party }
         in exercise @M:T CallBadConfig cid ();
@@ -98,6 +110,10 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
       val runBadInput : Party -> Update Text = \(party: Party) ->
         ubind cid: ContractId M:T <- create @M:T M:T { party = party }
         in exercise @M:T CallBadInput cid ();
+
+      val runOddLengthInput : Party -> Update Text = \(party: Party) ->
+        ubind cid: ContractId M:T <- create @M:T M:T { party = party }
+        in exercise @M:T CallOddLengthInput cid ();
 
       val runUppercaseConfig : Party -> Update Text = \(party: Party) ->
         ubind cid: ContractId M:T <- create @M:T M:T { party = party }
@@ -152,7 +168,7 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
     assertPreparationFailed(result)
   }
 
-  private def assertPreparationFailed(result: Either[SError.SError, SValue]): Unit = {
+  private def assertPreparationFailed(result: Either[SError.SError, SValue]): Unit =
     discard(
       inside(result) {
         case Left(
@@ -164,9 +180,8 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
           message should include("expected canonical lowercase hex")
       }
     )
-  }
 
-  private def assertInvalidOutput(result: Either[SError.SError, SValue]): Unit = {
+  private def assertInvalidOutput(result: Either[SError.SError, SValue]): Unit =
     discard(
       inside(result) {
         case Left(
@@ -184,9 +199,8 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
           message should include("expected canonical lowercase hex")
       }
     )
-  }
 
-  private def assertCallFailed(result: Either[SError.SError, SValue]): Unit = {
+  private def assertCallFailed(result: Either[SError.SError, SValue]): Unit =
     discard(
       inside(result) {
         case Left(
@@ -203,50 +217,51 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
           message shouldBe "upstream unavailable"
       }
     )
-  }
 
   "SBExternalCall" should {
-    "resume through NeedExternalCall and record the result on the exercise node" in {
-      val machine = Speedy.Machine.fromUpdateSExpr(
-        pkgs,
-        transactionSeed,
-        SEApp(pkgs.compiler.unsafeCompile(e"M:run"), ArraySeq(SParty(alice))),
-        Set(alice),
-        MachineLogger(),
-      )
+    Seq(
+      ("populated", e"M:run", "0a0b", "c0ff", "beef"),
+      ("empty", e"M:runEmptyPayloads", "", "", ""),
+    ).foreach { case (label, expr, expectedConfig, expectedInput, expectedOutput) =>
+      s"resume NeedExternalCall and record the result on the exercise node ($label payloads)" in {
+        val machine = machineForRun(pkgs.compiler.unsafeCompile(expr))
 
-      var questions = 0
-      val result = SpeedyTestLib.runTxQ[Question.Update](
-        {
-          case Question.Update.NeedExternalCall(extensionId, functionId, configHash, input, callback) =>
-            questions += 1
-            extensionId shouldBe "ext"
-            functionId shouldBe "fun"
-            configHash shouldBe "0a0b"
-            input shouldBe "c0ff"
-            callback(Right("beef"))
-          case other =>
-            fail(s"Unexpected question: $other")
-        },
-        machine,
-      )
-
-      result shouldBe Right(SText("beef"))
-      questions shouldBe 1
-
-      inside(machine.finish) { case Right(commit) =>
-        val exerciseNodes = commit.tx.nodes.collect { case (_, exercise: Node.Exercise) => exercise }
-        exerciseNodes should have size 1
-        exerciseNodes.head.version shouldBe SerializationVersion.minExternalCallResults
-        exerciseNodes.head.externalCallResults shouldBe ImmArray(
-          ExternalCallResult(
-            extensionId = "ext",
-            functionId = "fun",
-            config = Bytes.assertFromString("0a0b"),
-            input = Bytes.assertFromString("c0ff"),
-            output = Bytes.assertFromString("beef"),
-          )
+        var questions = 0
+        val result = SpeedyTestLib.runTxQ[Question.Update](
+          {
+            case Question.Update
+                  .NeedExternalCall(extensionId, functionId, configHash, input, callback) =>
+              questions += 1
+              extensionId shouldBe "ext"
+              functionId shouldBe "fun"
+              configHash shouldBe expectedConfig
+              input shouldBe expectedInput
+              callback(Right(expectedOutput))
+            case other =>
+              fail(s"Unexpected question: $other")
+          },
+          machine,
         )
+
+        result shouldBe Right(SText(expectedOutput))
+        questions shouldBe 1
+
+        inside(machine.finish) { case Right(commit) =>
+          val exerciseNodes = commit.tx.nodes.collect { case (_, exercise: Node.Exercise) =>
+            exercise
+          }
+          exerciseNodes should have size 1
+          exerciseNodes.head.version shouldBe SerializationVersion.minExternalCallResults
+          exerciseNodes.head.externalCallResults shouldBe ImmArray(
+            ExternalCallResult(
+              extensionId = "ext",
+              functionId = "fun",
+              config = Bytes.assertFromString(expectedConfig),
+              input = Bytes.assertFromString(expectedInput),
+              output = Bytes.assertFromString(expectedOutput),
+            )
+          )
+        }
       }
     }
 
@@ -262,7 +277,8 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
       var questions = 0
       val result = SpeedyTestLib.runTxQ[Question.Update](
         {
-          case Question.Update.NeedExternalCall(extensionId, functionId, configHash, input, callback) =>
+          case Question.Update
+                .NeedExternalCall(extensionId, functionId, configHash, input, callback) =>
             questions += 1
             extensionId shouldBe "ext"
             functionId shouldBe "fun"
@@ -279,7 +295,9 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
       questions shouldBe 1
 
       inside(machine.finish) { case Right(commit) =>
-        val exerciseNodes = commit.tx.nodes.collect { case (_, exercise: Node.Exercise) => exercise }
+        val exerciseNodes = commit.tx.nodes.collect { case (_, exercise: Node.Exercise) =>
+          exercise
+        }
         exerciseNodes should have size 1
         exerciseNodes.head.externalCallResults shouldBe ImmArray(
           ExternalCallResult(
@@ -305,7 +323,8 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
       var questions = 0
       val result = SpeedyTestLib.runTxQ[Question.Update](
         {
-          case Question.Update.NeedExternalCall(extensionId, functionId, configHash, input, callback) =>
+          case Question.Update
+                .NeedExternalCall(extensionId, functionId, configHash, input, callback) =>
             questions += 1
             extensionId shouldBe "ext"
             functionId shouldBe "fun"
@@ -322,7 +341,9 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
       questions shouldBe 1
 
       inside(machine.finish) { case Right(commit) =>
-        val exerciseNodes = commit.tx.nodes.collect { case (_, exercise: Node.Exercise) => exercise }
+        val exerciseNodes = commit.tx.nodes.collect { case (_, exercise: Node.Exercise) =>
+          exercise
+        }
         exerciseNodes should have size 1
         exerciseNodes.head.externalCallResults shouldBe ImmArray(
           ExternalCallResult(
@@ -433,6 +454,7 @@ class ExternalCallTest extends AnyWordSpec with Matchers with Inside with Suppre
         "padded config" -> pkgs.compiler.unsafeCompile(e"M:runPaddedConfig"),
         "uppercase input" -> pkgs.compiler.unsafeCompile(e"M:runUppercaseInput"),
         "padded input" -> pkgs.compiler.unsafeCompile(e"M:runPaddedInput"),
+        "odd-length input" -> pkgs.compiler.unsafeCompile(e"M:runOddLengthInput"),
       ).foreach { case (label, run) =>
         withClue(label) {
           rejectConfigOrInputBeforeExternalCall(run)

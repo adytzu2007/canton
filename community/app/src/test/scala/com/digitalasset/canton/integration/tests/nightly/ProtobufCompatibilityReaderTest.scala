@@ -61,6 +61,8 @@ final class ProtobufCompatibilityReaderTest
       """com/digitalasset/canton/topology/admin/v30/topology_manager_read_service.proto:Previously present RPC "ListSequencerConnectionSuccessor" on service "TopologyManagerReadService" was deleted.""",
       """com/digitalasset/canton/topology/admin/v30/topology_manager_read_service.proto:Previously present RPC "ListSynchronizerUpgradeAnnouncement" on service "TopologyManagerReadService" was deleted.""",
       """com/digitalasset/canton/topology/admin/v30/topology_manager_read_service.proto:Previously present RPC "LogicalUpgradeState" on service "TopologyManagerReadService" was deleted.""",
+      // transaction_hash added to TransactionSubmissionTrackingData in 3.6; older nodes simply ignore the new field
+      """com/digitalasset/canton/participant/protocol/v30/submission_tracking.proto:Previously present field "4" with name "transaction_hash" on message "TransactionSubmissionTrackingData" was deleted.""",
 
       /// Backward compatibility
       """com/digitalasset/canton/admin/sequencer/v30/sequencer_connection.proto:Previously present field "3" with name "confirmation_response_factor" on message "SubmissionRequestAmplification" was deleted.""",
@@ -99,6 +101,8 @@ final class ProtobufCompatibilityReaderTest
       """com/digitalasset/canton/protocol/v30/participant_transaction.proto:Previously present field "4" with name "lookup_by_key" on message "ActionDescription" was deleted.""",
       """com/digitalasset/canton/protocol/v30/participant_transaction.proto:Previously present reserved name "lookup_by_key" on message "ActionDescription" was deleted.""",
       """com/digitalasset/canton/protocol/v30/participant_transaction.proto:Previously present reserved range "[4]" on message "ActionDescription" is missing values: [4] were removed.""",
+      // Added `subscription_liveness_limits` to `SequencerConnections` for silent subscription detection
+      """com/digitalasset/canton/admin/sequencer/v30/sequencer_connection.proto:Previously present field "6" with name "subscription_liveness_limits" on message "SequencerConnections" was deleted.""",
     ),
     (3, 5) -> Seq(
       // Changed for 3.5.1-rc4
@@ -107,6 +111,8 @@ final class ProtobufCompatibilityReaderTest
       // Added ML-DSA support to 3.6, crypto handshake handles missing schemes with 3.5
       """com/digitalasset/canton/crypto/v30/crypto.proto:Previously present enum value "5" on enum "SigningKeySpec" was deleted.""",
       """com/digitalasset/canton/crypto/v30/crypto.proto:Previously present enum value "4" on enum "SigningAlgorithmSpec" was deleted.""",
+      // transaction_hash added to TransactionSubmissionTrackingData in 3.6; older nodes simply ignore the new field
+      """com/digitalasset/canton/participant/protocol/v30/submission_tracking.proto:Previously present field "4" with name "transaction_hash" on message "TransactionSubmissionTrackingData" was deleted.""",
       // Transaction snapshot does not need to be included in the forward/backward compatibility testing
       """<input>:1:1:Previously present file "com/digitalasset/daml/lf/snapshot.proto" was deleted.""",
       // Removal of LookupByKeyActionDescription
@@ -116,8 +122,6 @@ final class ProtobufCompatibilityReaderTest
       // removal of lookup_by_key from Update
       """com/digitalasset/daml/lf/archive/daml_lf2.proto:Previously present field "8" with name "lookup_by_key" on message "Update" was deleted.""",
       """com/digitalasset/daml/lf/archive/daml_lf2.proto:Previously present reserved range "[8]" on message "Update" is missing values: [8] were removed.""",
-      // Import package change only: com.digitalasset.canton.admin.topology -> com.digitalasset.canton.topology.admin
-      """com/digitalasset/canton/admin/participant/v30/synchronizer_connectivity_service.proto:Field "5" with name "synchronizer_predecessor" on message "Result" changed type from "com.digitalasset.canton.admin.topology.v30.SynchronizerPredecessor" to "com.digitalasset.canton.topology.admin.v30.SynchronizerPredecessor".""",
       // Added `subscription_liveness_limits` to `SequencerConnections` for silent subscription detection
       """com/digitalasset/canton/admin/sequencer/v30/sequencer_connection.proto:Previously present field "6" with name "subscription_liveness_limits" on message "SequencerConnections" was deleted.""",
     ),

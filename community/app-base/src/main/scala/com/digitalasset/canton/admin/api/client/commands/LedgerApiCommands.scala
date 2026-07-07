@@ -153,6 +153,7 @@ import com.daml.ledger.api.v2.transaction_filter.{
 }
 import com.daml.ledger.api.v2.update_service.UpdateServiceGrpc.UpdateServiceStub
 import com.daml.ledger.api.v2.update_service.{
+  GetUpdateByHashRequest,
   GetUpdateByIdRequest,
   GetUpdateByOffsetRequest,
   GetUpdateResponse,
@@ -181,10 +182,6 @@ import com.digitalasset.canton.config.NonNegativeDuration
 import com.digitalasset.canton.config.RequireTypes.{NonNegativeInt, PositiveInt}
 import com.digitalasset.canton.crypto.{Signature, SigningPublicKey}
 import com.digitalasset.canton.data.{CantonTimestamp, DeduplicationPeriod}
-import com.digitalasset.canton.ledger.api.{
-  IdentityProviderConfig as ApiIdentityProviderConfig,
-  IdentityProviderId,
-}
 import com.digitalasset.canton.ledger.client.services.admin.IdentityProviderConfigClient
 import com.digitalasset.canton.logging.ErrorLoggingContext
 import com.digitalasset.canton.logging.pretty.{Pretty, PrettyPrinting}
@@ -194,11 +191,29 @@ import com.digitalasset.canton.participant.admin.party.PartyParticipantPermissio
 import com.digitalasset.canton.platform.apiserver.execution.CommandStatus
 import com.digitalasset.canton.protocol.LfContractId
 import com.digitalasset.canton.serialization.ProtoConverter
+import com.digitalasset.canton.tea.v1.TrafficServiceGrpc.TrafficServiceStub
+import com.digitalasset.canton.tea.v1.{
+  GetAccountRequest,
+  GetAccountResponse,
+  TrafficServiceGrpc,
+  UpdateAccountRequest,
+  UpdateAccountResponse,
+}
 import com.digitalasset.canton.topology.transaction.ParticipantPermission
 import com.digitalasset.canton.topology.transaction.TopologyTransaction.GenericTopologyTransaction
 import com.digitalasset.canton.topology.{ParticipantId, Party, PartyId, SynchronizerId}
+import com.digitalasset.canton.user.{
+  IdentityProviderConfig as ApiIdentityProviderConfig,
+  IdentityProviderId,
+}
 import com.digitalasset.canton.util.{BinaryFileUtil, GrpcStreamingUtils, ResourceUtil}
-import com.digitalasset.canton.{LfPackageId, LfPackageName, LfPartyId, config}
+import com.digitalasset.canton.{
+  GrpcServiceInvocationMethod,
+  LfPackageId,
+  LfPackageName,
+  LfPartyId,
+  config,
+}
 import com.google.protobuf.ByteString
 import com.google.protobuf.empty.Empty
 import com.google.protobuf.field_mask.FieldMask
@@ -766,6 +781,7 @@ object LedgerApiCommands {
       def identityProviderAdmin: Boolean
       def readAsAnyParty: Boolean
       def executeAsAnyParty: Boolean
+      def actAsAnyParty: Boolean
 
       protected def getRights: Seq[UserRight] =
         actAs.toSeq.map(x => UserRight.defaultInstance.withCanActAs(UserRight.CanActAs(x))) ++
@@ -789,6 +805,11 @@ object LedgerApiCommands {
              Seq(
                UserRight.defaultInstance.withCanExecuteAsAnyParty(UserRight.CanExecuteAsAnyParty())
              )
+           else Seq()) ++
+          (if (actAsAnyParty)
+             Seq(
+               UserRight.defaultInstance.withCanActAsAnyParty(UserRight.CanActAsAnyParty())
+             )
            else Seq())
     }
 
@@ -806,6 +827,7 @@ object LedgerApiCommands {
         readAsAnyParty: Boolean,
         executeAs: Set[LfPartyId],
         executeAsAnyParty: Boolean,
+        actAsAnyParty: Boolean,
     ) extends BaseCommand[CreateUserRequest, CreateUserResponse, LedgerApiUser]
         with HasRights {
 
@@ -1013,6 +1035,7 @@ object LedgerApiCommands {
           identityProviderId: String,
           readAsAnyParty: Boolean,
           executeAsAnyParty: Boolean,
+          actAsAnyParty: Boolean,
       ) extends BaseCommand[GrantUserRightsRequest, GrantUserRightsResponse, UserRights]
           with HasRights {
 
@@ -1047,6 +1070,7 @@ object LedgerApiCommands {
           identityProviderId: String,
           readAsAnyParty: Boolean,
           executeAsAnyParty: Boolean,
+          actAsAnyParty: Boolean,
       ) extends BaseCommand[RevokeUserRightsRequest, RevokeUserRightsResponse, UserRights]
           with HasRights {
 
@@ -1463,25 +1487,21 @@ object LedgerApiCommands {
 
     }
 
-    final case class GetUpdateById(id: String, updateFormat: UpdateFormat)(implicit
-        ec: ExecutionContext
-    ) extends BaseCommand[GetUpdateByIdRequest, Option[GetUpdateResponse], Option[UpdateWrapper]]
+    sealed abstract class GetUpdateCommand[Req](implicit ec: ExecutionContext)
+        extends BaseCommand[Req, Option[GetUpdateResponse], Option[UpdateWrapper]]
         with PrettyPrinting {
-      override protected def createRequest(): Either[String, GetUpdateByIdRequest] = Right {
-        GetUpdateByIdRequest(
-          updateId = id,
-          updateFormat = Some(updateFormat),
-        )
-      }
+
+      @GrpcServiceInvocationMethod
+      protected def getUpdate(service: UpdateServiceStub, request: Req): Future[GetUpdateResponse]
 
       override protected def submitRequest(
           service: UpdateServiceStub,
-          request: GetUpdateByIdRequest,
+          request: Req,
       ): Future[Option[GetUpdateResponse]] =
-        // The Ledger API will throw an error if it can't find an update by ID.
-        // However, as Canton is distributed, an update ID might show up later, so we don't treat this as
-        // an error and change it to a None
-        service.getUpdateById(request).map(Some(_)).recover {
+        // The Ledger API will throw an error if it can't find the update.
+        // However, as Canton is distributed, an update might show up later, so we don't treat this
+        // as an error and change it to a None
+        getUpdate(service, request).map(Some(_)).recover {
           case e: StatusRuntimeException if e.getStatus.getCode == Status.Code.NOT_FOUND =>
             None
         }
@@ -1490,6 +1510,23 @@ object LedgerApiCommands {
           response: Option[GetUpdateResponse]
       ): Either[String, Option[UpdateWrapper]] =
         Right(extractUpdate(response))
+    }
+
+    final case class GetUpdateById(id: String, updateFormat: UpdateFormat)(implicit
+        ec: ExecutionContext
+    ) extends GetUpdateCommand[GetUpdateByIdRequest] {
+      override protected def createRequest(): Either[String, GetUpdateByIdRequest] = Right {
+        GetUpdateByIdRequest(
+          updateId = id,
+          updateFormat = Some(updateFormat),
+        )
+      }
+
+      override protected def getUpdate(
+          service: UpdateServiceStub,
+          request: GetUpdateByIdRequest,
+      ): Future[GetUpdateResponse] =
+        service.getUpdateById(request)
 
       override protected def pretty: Pretty[GetUpdateById] =
         prettyOfClass(
@@ -1500,10 +1537,7 @@ object LedgerApiCommands {
 
     final case class GetUpdateByOffset(offset: Long, updateFormat: UpdateFormat)(implicit
         ec: ExecutionContext
-    ) extends BaseCommand[GetUpdateByOffsetRequest, Option[GetUpdateResponse], Option[
-          UpdateWrapper
-        ]]
-        with PrettyPrinting {
+    ) extends GetUpdateCommand[GetUpdateByOffsetRequest] {
       override protected def createRequest(): Either[String, GetUpdateByOffsetRequest] = Right {
         GetUpdateByOffsetRequest(
           offset = offset,
@@ -1511,26 +1545,38 @@ object LedgerApiCommands {
         )
       }
 
-      override protected def submitRequest(
+      override protected def getUpdate(
           service: UpdateServiceStub,
           request: GetUpdateByOffsetRequest,
-      ): Future[Option[GetUpdateResponse]] =
-        // The Ledger API will throw an error if it can't find an update by ID.
-        // However, as Canton is distributed, an update ID might show up later, so we don't treat this as
-        // an error and change it to a None
-        service.getUpdateByOffset(request).map(Some(_)).recover {
-          case e: StatusRuntimeException if e.getStatus.getCode == Status.Code.NOT_FOUND =>
-            None
-        }
-
-      override protected def handleResponse(
-          response: Option[GetUpdateResponse]
-      ): Either[String, Option[UpdateWrapper]] =
-        Right(extractUpdate(response))
+      ): Future[GetUpdateResponse] =
+        service.getUpdateByOffset(request)
 
       override protected def pretty: Pretty[GetUpdateByOffset] =
         prettyOfClass(
           param("offset", _.offset),
+          param("updateFormat", _.updateFormat.toString.unquoted),
+        )
+    }
+
+    final case class GetUpdateByHash(hash: ByteString, updateFormat: UpdateFormat)(implicit
+        ec: ExecutionContext
+    ) extends GetUpdateCommand[GetUpdateByHashRequest] {
+      override protected def createRequest(): Either[String, GetUpdateByHashRequest] = Right {
+        GetUpdateByHashRequest(
+          transactionHash = hash,
+          updateFormat = Some(updateFormat),
+        )
+      }
+
+      override protected def getUpdate(
+          service: UpdateServiceStub,
+          request: GetUpdateByHashRequest,
+      ): Future[GetUpdateResponse] =
+        service.getUpdateByHash(request)
+
+      override protected def pretty: Pretty[GetUpdateByHash] =
+        prettyOfClass(
+          param("hash", _.hash.toByteArray.map("%02x".format(_)).mkString.unquoted),
           param("updateFormat", _.updateFormat.toString.unquoted),
         )
     }
@@ -1883,6 +1929,7 @@ object LedgerApiCommands {
         minLedgerTimeAbs: Option[Instant],
         deduplicationPeriod: Option[DeduplicationPeriod],
         hashingSchemeVersion: HashingSchemeVersion,
+        optTimeout: Option[config.NonNegativeDuration],
     ) extends BaseCommand[
           ExecuteSubmissionAndWaitRequest,
           ExecuteSubmissionAndWaitResponse,
@@ -1912,7 +1959,8 @@ object LedgerApiCommands {
       ): Either[String, ExecuteSubmissionAndWaitResponse] =
         Right(response)
 
-      override def timeoutType: TimeoutType = DefaultUnboundedTimeout
+      override def timeoutType: TimeoutType =
+        optTimeout.map(CustomClientTimeout(_)).getOrElse(DefaultUnboundedTimeout)
     }
 
     final case class ExecuteAndWaitForTransactionCommand(
@@ -1926,6 +1974,7 @@ object LedgerApiCommands {
         transactionShape: Option[TransactionShape],
         includeCreatedEventBlob: Boolean,
         customEventFormat: Option[EventFormat],
+        optTimeout: Option[config.NonNegativeDuration],
     ) extends BaseCommand[
           ExecuteSubmissionAndWaitForTransactionRequest,
           ExecuteSubmissionAndWaitForTransactionResponse,
@@ -1987,7 +2036,8 @@ object LedgerApiCommands {
       ): Either[String, ExecuteSubmissionAndWaitForTransactionResponse] =
         Right(response)
 
-      override def timeoutType: TimeoutType = DefaultUnboundedTimeout
+      override def timeoutType: TimeoutType =
+        optTimeout.map(CustomClientTimeout(_)).getOrElse(DefaultUnboundedTimeout)
     }
 
     final case class PreferredPackageVersion(
@@ -2584,6 +2634,50 @@ object LedgerApiCommands {
           request: GetEventsByContractIdRequest,
       ): Future[GetEventsByContractIdResponse] = service.getEventsByContractId(request)
 
+    }
+  }
+  object Traffic {
+
+    abstract class BaseCommand[Req, Res] extends GrpcAdminCommand[Req, Res, Res] {
+      override type Svc = TrafficServiceStub
+
+      override def createService(channel: ManagedChannel): TrafficServiceStub =
+        TrafficServiceGrpc.stub(channel)
+
+      override protected def handleResponse(response: Res): Either[String, Res] = Right(response)
+    }
+
+    final case class GetAccount(accountId: String)
+        extends BaseCommand[
+          GetAccountRequest,
+          GetAccountResponse,
+        ] {
+      override protected def createRequest(): Either[String, GetAccountRequest] =
+        Right(GetAccountRequest(accountId))
+
+      override protected def submitRequest(
+          service: TrafficServiceStub,
+          request: GetAccountRequest,
+      ): Future[GetAccountResponse] =
+        service.getAccount(request)
+    }
+
+    final case class UpdateAccount(
+        accountId: String,
+        balanceDelta: Option[Long],
+        deduplicationId: String,
+    ) extends BaseCommand[
+          UpdateAccountRequest,
+          UpdateAccountResponse,
+        ] {
+      override protected def createRequest(): Either[String, UpdateAccountRequest] =
+        Right(UpdateAccountRequest(accountId, balanceDelta, deduplicationId))
+
+      override protected def submitRequest(
+          service: TrafficServiceStub,
+          request: UpdateAccountRequest,
+      ): Future[UpdateAccountResponse] =
+        service.updateAccount(request)
     }
   }
 }

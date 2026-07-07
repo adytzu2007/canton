@@ -3,7 +3,6 @@
 
 package com.digitalasset.canton.integration.tests.security
 
-import com.daml.nonempty.NonEmpty
 import com.daml.test.evidence.tag.Security.SecurityTestSuite
 import com.digitalasset.canton.admin.api.client.data.StaticSynchronizerParameters
 import com.digitalasset.canton.config.{
@@ -20,6 +19,7 @@ import com.digitalasset.canton.integration.{
   SharedEnvironment,
 }
 import com.digitalasset.canton.synchronizer.config.SynchronizerParametersConfig
+import com.digitalasset.nonempty.NonEmpty
 import monocle.macros.syntax.lens.*
 
 /** Integration test for post-quantum cryptography support in nodes.
@@ -96,9 +96,10 @@ class PostQuantumCryptoIntegrationTest
     EnvironmentDefinition
       .P4_S1M1_S1M1_S1M1(
         Map(
-          syncTrad -> StaticSynchronizerParameters.defaults(jce, testedProtocolVersion),
+          syncTrad -> StaticSynchronizerParameters
+            .defaults(cryptoConfig = jce, protocolVersion = testedProtocolVersion),
           syncPqcSupport -> StaticSynchronizerParameters
-            .defaults(jceWithExperimental, testedProtocolVersion),
+            .defaults(cryptoConfig = jceWithExperimental, protocolVersion = testedProtocolVersion),
           syncPqcOnly -> StaticSynchronizerParameters.fromConfig(
             SynchronizerParametersConfig()
               .copy(

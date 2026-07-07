@@ -5,6 +5,7 @@ package com.digitalasset.canton.platform.component
 
 import com.digitalasset.canton.ledger.api.*
 import com.digitalasset.canton.ledger.api.TransactionShape.LedgerEffects
+import com.digitalasset.canton.ledger.participant.state.index.IndexUpdateService.UpdateResponse
 import org.apache.pekko.stream.scaladsl.Sink
 import org.scalatest.wordspec.AnyWordSpec
 
@@ -22,12 +23,14 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
     ),
     includeReassignments = None,
     includeTopologyEvents = None,
+    includeAcsCommitments = None,
+    includeAcsChanges = None,
   )
   private val nextRecordTime = new SingleStepIncreasingRecordTime
 
   "update stream in reverse order" should {
     "stream create transactions" in {
-      val rangeStart = index.currentLedgerEnd().futureValue
+      val rangeStart = index.currentLedgerEnd().map(_.lastOffset)
       val createContracts =
         Vector.tabulate(10)(_ => creates(nextRecordTime, 10)(1))
       val rangeEnd = ingestUpdates(createContracts*)
@@ -38,7 +41,10 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
         descendingOrder = true,
         skipPruningChecks = false,
       )
-      val updates = updatesStream.runWith(Sink.seq).futureValue
+      val updates = updatesStream
+        .collect { case UpdateResponse.ProtoUpdate(response) => response }
+        .runWith(Sink.seq)
+        .futureValue
       updates.flatMap(
         _.update.transaction.value.events.map(_.getCreated.contractId)
       ) should contain theSameElementsInOrderAs (createContracts.reverse.flatMap(
@@ -47,7 +53,7 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
     }
 
     "preserve order of events inside a transaction" in {
-      val rangeStart = index.currentLedgerEnd().futureValue
+      val rangeStart = index.currentLedgerEnd().map(_.lastOffset)
       val createContracts =
         Vector.tabulate(10)(_ => creates(nextRecordTime, 10)(5))
       val rangeEnd = ingestUpdates(createContracts*)
@@ -58,7 +64,10 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
         descendingOrder = true,
         skipPruningChecks = false,
       )
-      val updates = updatesStream.runWith(Sink.seq).futureValue
+      val updates = updatesStream
+        .collect { case UpdateResponse.ProtoUpdate(response) => response }
+        .runWith(Sink.seq)
+        .futureValue
       updates.map(
         _.update.transaction.value.events.map(_.getCreated.contractId)
       ) should contain theSameElementsInOrderAs (createContracts.reverse.map(
@@ -67,7 +76,7 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
     }
 
     "properly order topology events interleaved with create events" in {
-      val rangeStart = index.currentLedgerEnd().futureValue
+      val rangeStart = index.currentLedgerEnd().map(_.lastOffset)
       val createContractsFirst =
         Vector.tabulate(3)(_ => creates(nextRecordTime, 10)(1))
       ingestUpdates(createContractsFirst*)
@@ -91,14 +100,17 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
         skipPruningChecks = false,
       )
 
-      val updates = updatesStream.runWith(Sink.seq).futureValue
+      val updates = updatesStream
+        .collect { case UpdateResponse.ProtoUpdate(response) => response }
+        .runWith(Sink.seq)
+        .futureValue
 
       updates.map(_.update.isTopologyTransaction) should contain theSameElementsInOrderAs (Seq(
         false, false, true, true, false, false, false))
     }
 
     "property order create events interleaved with reassignments" in {
-      val rangeStart = index.currentLedgerEnd().futureValue
+      val rangeStart = index.currentLedgerEnd().map(_.lastOffset)
       val create1 = creates(nextRecordTime, 10)(1)
       val create2 = creates(nextRecordTime, 10)(1)
 
@@ -140,7 +152,10 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
         skipPruningChecks = false,
       )
 
-      val updates = updatesStream.runWith(Sink.seq).futureValue
+      val updates = updatesStream
+        .collect { case UpdateResponse.ProtoUpdate(response) => response }
+        .runWith(Sink.seq)
+        .futureValue
 
       updates should have size 5
 
@@ -159,7 +174,7 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
     }
 
     "preserve order of 2 creates, 2 topology events and 2 reassignments interleaved" in {
-      val rangeStart = index.currentLedgerEnd().futureValue
+      val rangeStart = index.currentLedgerEnd().map(_.lastOffset)
       val create1 = creates(nextRecordTime, 10)(1)
 
       ingestUpdates(create1)
@@ -183,8 +198,7 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
       )
       ingestUpdateSync(reassignment2)
 
-      val rangeEnd = index.currentLedgerEnd().futureValue.value
-
+      val rangeEnd = index.currentLedgerEnd().value.lastOffset
       val updatesStream = index.updates(
         begin = rangeStart,
         endAt = Some(rangeEnd),
@@ -205,7 +219,10 @@ class UpdateStreamComponentTest extends AnyWordSpec with IndexComponentTest {
         skipPruningChecks = false,
       )
 
-      val updates = updatesStream.runWith(Sink.seq).futureValue
+      val updates = updatesStream
+        .collect { case UpdateResponse.ProtoUpdate(response) => response }
+        .runWith(Sink.seq)
+        .futureValue
 
       updates should have size 6
       updates.map(u =>

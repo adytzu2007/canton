@@ -13,6 +13,7 @@ import com.digitalasset.canton.platform.apiserver.execution.{
   TestDynamicSynchronizerParameterGetter,
 }
 import com.digitalasset.canton.platform.config.CommandServiceConfig
+import com.digitalasset.canton.platform.execution.ExternalCallHandler
 import com.digitalasset.canton.protocol.{AuthenticatedContractIdVersionV10, LfFatContractInst}
 import com.digitalasset.canton.time.NonNegativeFiniteDuration
 import com.digitalasset.canton.util.{ContractValidator, TestEngine}
@@ -44,7 +45,11 @@ class DisclosedContractNormalizationTest
   )
 
   private val testEngine =
-    new TestEngine(packagePaths = Seq(UpgradingBaseTest.UpgradeV2), loggerFactory = loggerFactory)
+    new TestEngine(
+      packagePaths = Seq(UpgradingBaseTest.UpgradeV2),
+      interpretationConfig = InterpretationConfig.Default,
+      loggerFactory = loggerFactory,
+    )
 
   private def buildUpgrading(
       alice: String,
@@ -121,6 +126,7 @@ class DisclosedContractNormalizationTest
         dynParamGetter =
           new TestDynamicSynchronizerParameterGetter(NonNegativeFiniteDuration.Zero)(ec),
         timeProvider = TimeProvider.UTC,
+        externalCallHandler = ExternalCallHandler.Unsupported,
       )(ec)
 
     def interpretDisclosure(cId: Upgrading.ContractId, fat: LfFatContractInst): Assertion = {

@@ -8,7 +8,7 @@ import com.digitalasset.canton.data.{CantonTimestamp, Offset}
 import com.digitalasset.canton.ledger.participant.state.index.ContractStateStatus
 import com.digitalasset.canton.metrics.LedgerApiServerMetrics
 import com.digitalasset.canton.platform.*
-import com.digitalasset.canton.platform.store.backend.ParameterStorageBackend.LedgerEnd
+import com.digitalasset.canton.platform.store.backend.LedgerEnd
 import com.digitalasset.canton.platform.store.cache.ContractStateCaches.{
   applyContractStateEvent,
   computeKeyStateChange,
@@ -225,6 +225,7 @@ class ContractStateCachesSpec
         lastEventSeqId = 125,
         lastStringInterningId = 0,
         lastPublicationTime = CantonTimestamp.MinValue,
+        synchronizerIndices = Map.empty,
       )
     )
 
@@ -842,7 +843,7 @@ class ContractStateCachesSpec
       val packageName = Ref.PackageName.assertFromString("pkg-name")
       val keyValue = keyIdx.incrementAndGet()
       val key = Option.when(withKey)(
-        Key.assertBuild(
+        Key(
           templateId,
           packageName,
           ValueInt64(keyValue),
@@ -906,7 +907,7 @@ class ContractStateCachesSpec
     ContractId.V1(Hash.hashPrivateKey(id.toString))
 
   private def key(value: Long): Key =
-    Key.assertBuild(
+    Key(
       Identifier.assertFromString("some:template:name"),
       Ref.PackageName.assertFromString("pkg-name"),
       ValueInt64(value),

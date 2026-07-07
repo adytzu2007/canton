@@ -5,7 +5,7 @@ package com.digitalasset.canton.util
 
 import cats.Id
 import com.daml.grpc.adapter.{ExecutionSequencerFactory, PekkoExecutionSequencerPool}
-import com.daml.metrics.api.noop.NoOpMeter
+import com.daml.metrics.api.noop.NoOpGauge
 import com.daml.metrics.api.{
   MetricHandle,
   MetricInfo,
@@ -13,7 +13,6 @@ import com.daml.metrics.api.{
   MetricQualification,
   MetricsContext,
 }
-import com.daml.nonempty.NonEmpty
 import com.daml.scalautil.Statement.discard
 import com.digitalasset.canton.concurrent.{DirectExecutionContext, Threading}
 import com.digitalasset.canton.config.RequireTypes.NonNegativeInt
@@ -33,6 +32,7 @@ import com.digitalasset.canton.util.ShowUtil.*
 import com.digitalasset.canton.util.SingletonTraverse.syntax.*
 import com.digitalasset.canton.util.Thereafter.syntax.*
 import com.digitalasset.canton.util.TryUtil.*
+import com.digitalasset.nonempty.NonEmpty
 import com.typesafe.config.ConfigFactory
 import com.typesafe.scalalogging.Logger
 import org.apache.pekko.actor.ActorSystem
@@ -145,7 +145,7 @@ object PekkoUtil extends HasLoggerName {
 
   /** Remembers the last `memory` many elements that have already been emitted previously. Passes
     * those remembered elements downstream with each new element. The current element is the
-    * [[com.daml.nonempty.NonEmptyCollInstances.NEPreservingOps.last1]] of the sequence.
+    * [[com.digitalasset.nonempty.NonEmptyCollInstances.NEPreservingOps.last1]] of the sequence.
     *
     * [[remember]] differs from [[org.apache.pekko.stream.scaladsl.FlowOps.sliding]] in that
     * [[remember]] emits elements immediately when the given source emits, whereas
@@ -1470,27 +1470,28 @@ object PekkoUtil extends HasLoggerName {
   }
 
   trait RecoveringQueueMetrics {
-    def blocked: MetricHandle.Meter
-    def buffered: MetricHandle.Meter
-    def uncommitted: MetricHandle.Meter
+    def blocked: MetricHandle.Gauge[Int]
+    def buffered: MetricHandle.Gauge[Int]
+    def uncommitted: MetricHandle.Gauge[Int]
   }
 
   object RecoveringQueueMetrics {
     def apply(
-        blockedMeter: MetricHandle.Meter,
-        bufferedMeter: MetricHandle.Meter,
-        uncommittedMeter: MetricHandle.Meter,
+        blockedGauge: MetricHandle.Gauge[Int],
+        bufferedGauge: MetricHandle.Gauge[Int],
+        uncommittedGauge: MetricHandle.Gauge[Int],
     ): RecoveringQueueMetrics = new RecoveringQueueMetrics {
-      override val blocked: MetricHandle.Meter = blockedMeter
-      override val buffered: MetricHandle.Meter = bufferedMeter
-      override val uncommitted: MetricHandle.Meter = uncommittedMeter
+      override val blocked: MetricHandle.Gauge[Int] = blockedGauge
+      override val buffered: MetricHandle.Gauge[Int] = bufferedGauge
+      override val uncommitted: MetricHandle.Gauge[Int] = uncommittedGauge
     }
 
     val NoOp: RecoveringQueueMetrics = {
-      val noOpMeter = NoOpMeter(
-        MetricInfo(MetricName.Daml, "", MetricQualification.Debug)
+      val noOpGauge = NoOpGauge(
+        MetricInfo(MetricName.Daml, "", MetricQualification.Debug),
+        0,
       )
-      apply(noOpMeter, noOpMeter, noOpMeter)
+      apply(noOpGauge, noOpGauge, noOpGauge)
     }
   }
 
@@ -1605,9 +1606,9 @@ object PekkoUtil extends HasLoggerName {
       (lock.exclusive(u))
 
     private def updateMetrics(): Unit = {
-      metrics.buffered.mark(buffered.size.toLong)(MetricsContext.Empty)
-      metrics.blocked.mark(blocked.size.toLong)(MetricsContext.Empty)
-      metrics.uncommitted.mark(uncommitted.size.toLong)(MetricsContext.Empty)
+      metrics.buffered.updateValue(buffered.size)(MetricsContext.Empty)
+      metrics.blocked.updateValue(blocked.size)(MetricsContext.Empty)
+      metrics.uncommitted.updateValue(uncommitted.size)(MetricsContext.Empty)
     }
   }
 

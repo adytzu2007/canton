@@ -101,6 +101,22 @@ object CommandExecutionErrors extends CommandExecutionErrorGroup {
   }
 
   @Explanation(
+    "This error occurs if a Ledger API command submission cannot debit from the given local traffic account."
+  )
+  @Resolution(
+    "Inspect the error details, adapt your Ledger API submission or contact the participant operator for adjusting your account details."
+  )
+  object TrafficAccountValidationFailed
+      extends ErrorCode(
+        id = "TRAFFIC_ACCOUNT_VALIDATION_FAILED",
+        ErrorCategory.InvalidGivenCurrentSystemStateOther,
+      ) {
+    final case class Reject(override val cause: String)(implicit
+        loggingContext: ErrorLoggingContext
+    ) extends DamlErrorWithDefiniteAnswer(cause = cause)
+  }
+
+  @Explanation(
     """This error occurs if the participant fails to determine the max ledger time of the used
       |contracts. Most likely, this means that one of the contracts is not active anymore which can
       |happen under contention. It can also happen with contract keys.
@@ -826,7 +842,7 @@ object CommandExecutionErrors extends CommandExecutionErrorGroup {
 
       final case class Reject(override val cause: String, err: LfInterpretationError.ValueNesting)(
           implicit loggingContext: ErrorLoggingContext
-      ) extends DamlErrorWithDefiniteAnswer(cause = cause) {}
+      ) extends DamlErrorWithDefiniteAnswer(cause = cause)
     }
 
     @Explanation(
@@ -838,7 +854,7 @@ object CommandExecutionErrors extends CommandExecutionErrorGroup {
 
       final case class Reject(override val cause: String, err: LfInterpretationError.MalformedText)(
           implicit loggingContext: ErrorLoggingContext
-      ) extends DamlErrorWithDefiniteAnswer(cause = cause) {}
+      ) extends DamlErrorWithDefiniteAnswer(cause = cause)
     }
 
     @Explanation(
@@ -1083,6 +1099,87 @@ object CommandExecutionErrors extends CommandExecutionErrorGroup {
       }
     }
 
+    @Explanation("Errors that occur when evaluating external-call primitives")
+    object ExternalCallError extends ErrorGroup {
+      private def externalCallResources(
+          extensionId: String,
+          functionId: String,
+          message: String,
+      ): Seq[(ErrorResource, String)] =
+        Seq(
+          ErrorResource.ExternalCallExtensionId -> extensionId,
+          ErrorResource.ExternalCallFunctionId -> functionId,
+          ErrorResource.ExceptionText -> message,
+        )
+
+      private def externalCallResources(
+          err: LfInterpretationError.ExternalCall.PreparationFailed
+      ): Seq[(ErrorResource, String)] =
+        externalCallResources(err.extensionId, err.functionId, err.message)
+
+      private def externalCallResources(
+          err: LfInterpretationError.ExternalCall.ExecutionFailed
+      ): Seq[(ErrorResource, String)] =
+        externalCallResources(err.extensionId, err.functionId, err.error.message)
+
+      @Explanation(
+        "External-call preparation failed before the participant issued the external call."
+      )
+      @Resolution(
+        "Check the external-call extension id, function id, config hash bytes, and input bytes."
+      )
+      object PreparationFailed
+          extends ErrorCode(
+            id = "INTERPRETATION_EXTERNAL_CALL_ERROR_PREPARATION_FAILED",
+            ErrorCategory.InvalidGivenCurrentSystemStateOther,
+          ) {
+        final case class Reject(
+            override val cause: String,
+            err: LfInterpretationError.ExternalCall.PreparationFailed,
+        )(implicit loggingContext: ErrorLoggingContext)
+            extends DamlErrorWithDefiniteAnswer(cause = cause) {
+          override def resources: Seq[(ErrorResource, String)] =
+            externalCallResources(err)
+        }
+      }
+
+      @Explanation("The external-call handler or service returned a failure.")
+      @Resolution(
+        "Check participant external-call configuration and the external service response."
+      )
+      object ExecutionFailed
+          extends ErrorCode(
+            id = "INTERPRETATION_EXTERNAL_CALL_ERROR_EXECUTION_FAILED",
+            ErrorCategory.InvalidGivenCurrentSystemStateOther,
+          ) {
+        final case class Reject(
+            override val cause: String,
+            err: LfInterpretationError.ExternalCall.ExecutionFailed,
+        )(implicit loggingContext: ErrorLoggingContext)
+            extends DamlErrorWithDefiniteAnswer(cause = cause) {
+          override def resources: Seq[(ErrorResource, String)] =
+            externalCallResources(err)
+        }
+      }
+
+      @Explanation("The external-call service returned output that is not valid canonical hex.")
+      @Resolution("Fix the external service to return canonical lowercase hex output.")
+      object InvalidOutput
+          extends ErrorCode(
+            id = "INTERPRETATION_EXTERNAL_CALL_ERROR_INVALID_OUTPUT",
+            ErrorCategory.InvalidGivenCurrentSystemStateOther,
+          ) {
+        final case class Reject(
+            override val cause: String,
+            err: LfInterpretationError.ExternalCall.ExecutionFailed,
+        )(implicit loggingContext: ErrorLoggingContext)
+            extends DamlErrorWithDefiniteAnswer(cause = cause) {
+          override def resources: Seq[(ErrorResource, String)] =
+            externalCallResources(err)
+        }
+      }
+    }
+
     @Explanation(
       """This error is a catch-all for errors thrown by in-development features, and should never be thrown in production."""
     )
@@ -1130,7 +1227,7 @@ object CommandExecutionErrors extends CommandExecutionErrorGroup {
         loggingContext: ErrorLoggingContext
     ) extends DamlErrorWithDefiniteAnswer(
           cause = cause
-        ) {}
+        )
   }
 
   @Explanation(

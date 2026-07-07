@@ -9,7 +9,6 @@ import cats.syntax.functor.*
 import cats.syntax.parallel.*
 import cats.{Eval, Monad}
 import com.daml.nameof.NameOf.functionFullName
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.*
 import com.digitalasset.canton.concurrent.FutureSupervisor
 import com.digitalasset.canton.config.RequireTypes.PositiveInt
@@ -76,6 +75,7 @@ import com.digitalasset.canton.participant.traffic.{
 }
 import com.digitalasset.canton.participant.util.{DAMLe, TimeOfChange}
 import com.digitalasset.canton.platform.apiserver.execution.CommandProgressTracker
+import com.digitalasset.canton.platform.apiserver.services.command.TrafficEnforcementBackend
 import com.digitalasset.canton.platform.apiserver.services.command.interactive.CostEstimationHints
 import com.digitalasset.canton.protocol.*
 import com.digitalasset.canton.protocol.WellFormedTransaction.WithoutSuffixes
@@ -125,6 +125,7 @@ import com.digitalasset.canton.version.{
   ProtocolVersion,
 }
 import com.digitalasset.daml.lf.engine.Engine
+import com.digitalasset.nonempty.NonEmpty
 import io.grpc.Status
 import io.opentelemetry.api.trace.Tracer
 import monocle.macros.syntax.lens.*
@@ -170,6 +171,7 @@ class ConnectedSynchronizer(
     journalGarbageCollector: JournalGarbageCollector,
     val acsCommitmentProcessor: AcsCommitmentProcessor,
     clock: Clock,
+    trafficEnforcementBackendO: Option[Eval[TrafficEnforcementBackend]],
     promiseUSFactory: DefaultPromiseUnlessShutdownFactory,
     metrics: ConnectedSynchronizerMetrics,
     futureSupervisor: FutureSupervisor,
@@ -291,6 +293,7 @@ class ConnectedSynchronizer(
     testingConfig = testingConfig,
     promiseUSFactory,
     parameters,
+    trafficEnforcementBackendO.map(_.value),
   )
 
   private val unassignmentProcessor: UnassignmentProcessor = new UnassignmentProcessor(
@@ -707,6 +710,7 @@ class ConnectedSynchronizer(
                 .modify(_ ++ requiredFlagsForPV),
               serial = Some(existingSynchronizerTrustCertificate.serial.increment),
               signingKeys = Seq.empty,
+              namespacesToSignFor = Seq.empty,
               protocolVersion = protocolVersion,
               expectFullAuthorization = false,
               forceChanges = ForceFlags.none,
@@ -788,6 +792,7 @@ class ConnectedSynchronizer(
             override def subscriptionStartsAt(
                 start: SubscriptionStart
             )(implicit traceContext: TraceContext): FutureUnlessShutdown[Unit] =
+              // TODO(#33650) – Statically bounded to 2 elements
               Seq(
                 topologyProcessor.subscriptionStartsAt(start)(traceContext),
                 trafficProcessor.subscriptionStartsAt(start)(traceContext),
@@ -825,10 +830,12 @@ class ConnectedSynchronizer(
               cleanProcessingTsO,
               monitor(messageHandler),
               ephemeral.timeTracker,
-              tc =>
-                participantNodePersistentState.value.ledgerApiStore
-                  .cleanSynchronizerIndex(psid.logical)(tc, ec)
-                  .map(_.flatMap(_.sequencerIndex)),
+              _ =>
+                FutureUnlessShutdown.pure(
+                  participantNodePersistentState.value.ledgerApiStore
+                    .cleanSynchronizerIndex(psid.logical)
+                    .flatMap(_.sequencerIndex)
+                ),
             )(initializationTraceContext)
           )
 
@@ -1240,6 +1247,7 @@ object ConnectedSynchronizer {
         reassignmentCoordination: ReassignmentCoordination,
         commandProgressTracker: CommandProgressTracker,
         clock: Clock,
+        trafficEnforcementBackendO: Option[Eval[TrafficEnforcementBackend]],
         promiseUSFactory: DefaultPromiseUnlessShutdownFactory,
         connectedSynchronizerMetrics: ConnectedSynchronizerMetrics,
         futureSupervisor: FutureSupervisor,
@@ -1267,6 +1275,7 @@ object ConnectedSynchronizer {
         reassignmentCoordination: ReassignmentCoordination,
         commandProgressTracker: CommandProgressTracker,
         clock: Clock,
+        trafficEnforcementBackendO: Option[Eval[TrafficEnforcementBackend]],
         promiseUSFactory: DefaultPromiseUnlessShutdownFactory,
         connectedSynchronizerMetrics: ConnectedSynchronizerMetrics,
         futureSupervisor: FutureSupervisor,
@@ -1285,9 +1294,9 @@ object ConnectedSynchronizer {
       )
       val journalGarbageCollector = new JournalGarbageCollector(
         persistentState.requestJournalStore,
-        tc =>
+        () =>
           participantNodePersistentState.value.ledgerApiStore
-            .cleanSynchronizerIndex(synchronizerHandle.psid.logical)(tc, ec),
+            .cleanSynchronizerIndex(synchronizerHandle.psid.logical),
         sortedReconciliationIntervalsProvider,
         persistentState.acsCommitmentStore,
         persistentState.activeContractStore,
@@ -1378,6 +1387,7 @@ object ConnectedSynchronizer {
           journalGarbageCollector,
           acsCommitmentProcessor,
           clock,
+          trafficEnforcementBackendO,
           promiseUSFactory,
           connectedSynchronizerMetrics,
           futureSupervisor,

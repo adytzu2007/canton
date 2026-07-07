@@ -7,7 +7,6 @@ import cats.data.EitherT
 import cats.syntax.bifunctor.*
 import cats.syntax.either.*
 import com.daml.nameof.NameOf.functionFullName
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.config.CantonRequireTypes.String300
 import com.digitalasset.canton.config.{KmsConfig, ProcessingTimeout}
 import com.digitalasset.canton.crypto.kms.KmsError.*
@@ -34,6 +33,7 @@ import com.digitalasset.canton.lifecycle.{FutureUnlessShutdown, LifeCycle}
 import com.digitalasset.canton.logging.{NamedLoggerFactory, NamedLogging}
 import com.digitalasset.canton.tracing.{NoReportingTracerProvider, TraceContext, TracerProvider}
 import com.digitalasset.canton.util.*
+import com.digitalasset.nonempty.NonEmpty
 import com.google.api.gax.rpc.ResourceExhaustedException
 import com.google.protobuf.ByteString
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider
@@ -52,6 +52,7 @@ import software.amazon.awssdk.utils.AttributeMap
 import java.net.URI
 import java.util.concurrent.CompletionException
 import scala.concurrent.ExecutionContext
+import scala.jdk.CollectionConverters.*
 import scala.jdk.FutureConverters.*
 
 /** Stands for Amazon Web Services - Key Management Service and is an internal KMS implementation
@@ -78,6 +79,14 @@ class AwsKms(
       "Unable to execute HTTP request: connection timed out",
       "Unable to execute HTTP request: BetterFixedChannelPooled was closed",
     )
+
+  private val keyCreationTags: java.util.Collection[Tag] =
+    (config.customTags + ("CreatedBy" -> "Canton"))
+      .map { case (key, value) =>
+        Tag.builder().tagKey(key).tagValue(value).build()
+      }
+      .toSeq
+      .asJava
 
   private def errorHandler(
       err: Throwable,
@@ -131,7 +140,7 @@ class AwsKms(
               .multiRegion(config.multiRegionKey)
               .keySpec(keySpec)
               .keyUsage(keyUsage)
-              .tags(Tag.builder().tagKey("CreatedBy").tagValue("Canton").build())
+              .tags(keyCreationTags)
               .description(name.map(_.unwrap).getOrElse(""))
               .withTraceContext(_.overrideConfiguration)
               .build

@@ -8,7 +8,6 @@ import cats.syntax.functor.*
 import com.daml.ledger.api.v2.commands.Command
 import com.daml.ledger.api.v2.commands.Command.toJavaProto
 import com.daml.ledger.javaapi
-import com.daml.nonempty.NonEmpty
 import com.daml.test.evidence.scalatest.AccessTestScenario
 import com.daml.test.evidence.scalatest.ScalaTestSupport.TagContainer
 import com.daml.test.evidence.tag.EvidenceTag
@@ -49,6 +48,7 @@ import com.digitalasset.canton.synchronizer.sequencer.HasProgrammableSequencer
 import com.digitalasset.canton.topology.PartyId
 import com.digitalasset.canton.topology.transaction.ParticipantPermission
 import com.digitalasset.canton.util.MaliciousParticipantNode
+import com.digitalasset.nonempty.NonEmpty
 import io.grpc.Status.Code
 import monocle.Traversal
 import monocle.macros.GenLens
@@ -1006,7 +1006,7 @@ trait LedgerAuthorizationIntegrationTest
     }
 
     lazy val setOneThresholdToZero: GenTransactionTree => GenTransactionTree =
-      GenTransactionTree.rootViewsUnsafe
+      GenTransactionTree.Optics.rootViewsUnsafe
         .andThen(firstElement[TransactionView])
         .andThen(TransactionView.Optics.viewCommonDataUnsafe)
         .andThen(MerkleTree.tryUnwrap[ViewCommonData])
@@ -1033,8 +1033,8 @@ trait LedgerAuthorizationIntegrationTest
       ): TransactionConfirmationRequest =
         confirmationRequest
           .focus(_.informeeMessage.fullInformeeTree)
-          .andThen(FullInformeeTree.genTransactionTreeUnsafe)
-          .andThen(GenTransactionTree.rootViewsUnsafe)
+          .andThen(FullInformeeTree.Optics.genTransactionTreeUnsafe)
+          .andThen(GenTransactionTree.Optics.rootViewsUnsafe)
           .andThen(firstElement[TransactionView])
           .andThen(TransactionView.Optics.viewCommonDataUnsafe)
           .modify(_.blindFully)
@@ -1138,7 +1138,7 @@ trait LedgerAuthorizationIntegrationTest
             )
 
           val withNonUniqueHashes: GenTransactionTree => GenTransactionTree =
-            GenTransactionTree.rootViewsUnsafe.modify { rootViews =>
+            GenTransactionTree.Optics.rootViewsUnsafe.modify { rootViews =>
               val rootViewsSeq = rootViews.unblindedElements
               val res =
                 MerkleSeq.fromSeq(pureCrypto, testedProtocolVersion)(rootViewsSeq ++ rootViewsSeq)

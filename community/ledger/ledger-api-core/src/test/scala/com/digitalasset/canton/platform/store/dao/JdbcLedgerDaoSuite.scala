@@ -5,6 +5,8 @@ package com.digitalasset.canton.platform.store.dao
 
 import com.daml.ledger.api.testtool.TestDars
 import com.digitalasset.canton.config.RequireTypes.NonNegativeLong
+import com.digitalasset.canton.crypto.HashAlgorithm.Sha256
+import com.digitalasset.canton.crypto.{Hash as CantonHash, HashPurpose}
 import com.digitalasset.canton.data.Offset
 import com.digitalasset.canton.ledger.api.TemplateFilter
 import com.digitalasset.canton.ledger.participant.state
@@ -29,6 +31,7 @@ import com.digitalasset.daml.lf.transaction.test.{NodeIdTransactionBuilder, Tran
 import com.digitalasset.daml.lf.transaction.{SerializationVersion as LfSerializationVersion, *}
 import com.digitalasset.daml.lf.value.Value as LfValue
 import com.digitalasset.daml.lf.value.Value.{ContractId, ValueText}
+import com.google.protobuf.ByteString
 import org.apache.pekko.stream.scaladsl.Sink
 import org.scalatest.{AsyncTestSuite, OptionValues}
 
@@ -195,6 +198,7 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend with OptionVa
         offset = offset,
         transaction = tx.transaction,
         recordTime = tx.recordedAt,
+        transactionHash = tx.transactionHash,
         contractActivenessChanged = contractActivenessChanged,
       )
     } yield offset -> tx
@@ -324,6 +328,7 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend with OptionVa
       recordedAt = let,
       transaction = txBuilder.buildCommitted(),
       explicitDisclosure = Map(eid -> (create.signatories union create.stakeholders)),
+      transactionHash = Some(preparedSubmissionHash(s"singleCreate-$id")),
     )
   }
 
@@ -357,7 +362,7 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend with OptionVa
       maintainers: Set[Party]
   ): GlobalKeyWithMaintainers = {
     val aTextValue = ValueText(scala.util.Random.nextString(10))
-    GlobalKeyWithMaintainers.assertBuild(
+    GlobalKeyWithMaintainers(
       someTemplateId,
       aTextValue,
       crypto.Hash.hashPrivateKey(aTextValue.toString),
@@ -650,6 +655,9 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend with OptionVa
       paidTrafficCost = NonNegativeLong.zero,
     )
 
+  protected final def preparedSubmissionHash(value: String): CantonHash =
+    CantonHash.digest(HashPurpose.PreparedSubmission, ByteString.copyFromUtf8(value), Sha256)
+
   protected final def storeSync(
       commands: Vector[(Offset, LedgerEntry.Transaction)]
   ): Future[Vector[(Offset, LedgerEntry.Transaction)]] = {
@@ -677,14 +685,13 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend with OptionVa
         signatories = Set(party),
         stakeholders = Set(party),
         key = Some(
-          GlobalKeyWithMaintainers
-            .assertBuild(
-              someTemplateId,
-              someContractKey(party, key),
-              crypto.Hash.hashPrivateKey(key),
-              Set(party),
-              somePackageName,
-            )
+          GlobalKeyWithMaintainers(
+            someTemplateId,
+            someContractKey(party, key),
+            crypto.Hash.hashPrivateKey(key),
+            Set(party),
+            somePackageName,
+          )
         ),
       )
     )
@@ -728,14 +735,13 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend with OptionVa
         exerciseResult = Some(LfValue.ValueUnit),
         keyOpt = maybeKey.map { k =>
           val keyValue = someContractKey(party, k)
-          GlobalKeyWithMaintainers
-            .assertBuild(
-              someTemplateId,
-              keyValue,
-              crypto.Hash.hashPrivateKey(keyValue.toString),
-              Set(party),
-              somePackageName,
-            )
+          GlobalKeyWithMaintainers(
+            someTemplateId,
+            keyValue,
+            crypto.Hash.hashPrivateKey(keyValue.toString),
+            Set(party),
+            somePackageName,
+          )
         },
         byKey = false,
         externalCallResults = ImmArray.empty,
@@ -757,25 +763,25 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend with OptionVa
   }
 
   /** A transaction that looks up a key */
-  protected final def txLookupByKey(
+  protected final def txQueryByKey(
       party: Party,
       key: String,
-      result: Option[ContractId],
+      result: Vector[ContractId],
   ): (Offset, LedgerEntry.Transaction) = {
     val txBuilder = newBuilder()
     val keyValue = someContractKey(party, key)
     val lookupByKeyNodeId = txBuilder.add(
-      Node.LookupByKey(
+      Node.QueryByKey(
         templateId = someTemplateId,
         packageName = somePackageName,
-        key = GlobalKeyWithMaintainers
-          .assertBuild(
-            someTemplateId,
-            keyValue,
-            crypto.Hash.hashPrivateKey(keyValue.toString),
-            Set(party),
-            somePackageName,
-          ),
+        exhaustive = result.isEmpty,
+        key = GlobalKeyWithMaintainers(
+          someTemplateId,
+          keyValue,
+          crypto.Hash.hashPrivateKey(keyValue.toString),
+          Set(party),
+          somePackageName,
+        ),
         result = result,
         version = txVersion,
       )
@@ -849,7 +855,7 @@ private[dao] trait JdbcLedgerDaoSuite extends JdbcLedgerDaoBackend with OptionVa
       parties: Set[Party],
   ): Future[Seq[(String, Int)]] =
     ledgerDao.completions
-      .getCommandCompletions(startInclusive, endInclusive, userId, parties)
+      .getCommandCompletions(startInclusive, endInclusive, Some(userId), parties)
       .map(_._2.completionResponse.completion.toList.head)
       .map(c => c.commandId -> c.status.value.code)
       .runWith(Sink.seq)

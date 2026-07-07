@@ -38,7 +38,6 @@ import com.digitalasset.canton.synchronizer.sequencer.block.bftordering.framewor
 import com.digitalasset.canton.synchronizer.sequencer.block.bftordering.framework.data.ordering.{
   CommitCertificate,
   OrderedBlock,
-  OrderingMode,
 }
 import com.digitalasset.canton.synchronizer.sequencer.block.bftordering.framework.data.topology.{
   Membership,
@@ -66,8 +65,6 @@ import com.digitalasset.canton.util.SingleUseCell
 import com.digitalasset.canton.version.ProtocolVersion
 import org.scalatest.wordspec.AsyncWordSpec
 
-import scala.util.Random
-
 class StateTransferBehaviorTest
     extends AsyncWordSpec
     with BftSequencerBaseTest
@@ -84,7 +81,9 @@ class StateTransferBehaviorTest
       "init" in {
         val (context, stateTransferBehavior) = createStateTransferBehavior()
 
-        stateTransferBehavior.ready(context.self)
+        stateTransferBehavior.ready(context.self)(
+          TraceContext.createNew("state_transfer_behavior_test")
+        )
 
         context.extractSelfMessages() shouldBe Seq(Consensus.Init.KickOff)
       }
@@ -390,7 +389,6 @@ class StateTransferBehaviorTest
               anEpochInfo,
               aMembership,
               aFakeCryptoProviderInstance,
-              origin = OrderingMode.StateTransfer,
             )
           )
 
@@ -419,63 +417,6 @@ class StateTransferBehaviorTest
 
           succeed
         }
-    }
-
-    "receiving a delayed new epoch stored message originated in consensus" should {
-      "just clean up the postponed message queue" in {
-        val stateTransferManagerMock = mock[StateTransferManager[ProgrammableUnitTestEnv]]
-        val p2pNetworkOutputBuffer = new collection.mutable.ArrayBuffer[P2PNetworkOut.Message]
-        val (context, stateTransferBehavior) =
-          createStateTransferBehavior(
-            maybeStateTransferManager = Some(stateTransferManagerMock),
-            p2pNetworkOutModuleRef = fakeRecordingModule(p2pNetworkOutputBuffer),
-          )
-        implicit val ctx: ContextType = context
-
-        val underlyingMessage = mock[ConsensusSegment.ConsensusMessage.PbftNetworkMessage]
-        when(underlyingMessage.blockMetadata).thenReturn(
-          BlockMetadata(
-            EpochNumber(anEpochInfo.number - 1L), // outdated message
-            BlockNumber.First,
-          )
-        )
-        val signedMessage = underlyingMessage.fakeSign
-        stateTransferBehavior.postponedConsensusMessages
-          .enqueue(
-            otherId,
-            Consensus.ConsensusMessage.PbftUnverifiedNetworkMessage(signedMessage),
-          )
-
-        stateTransferBehavior.receive(
-          Consensus.NewEpochStored(
-            anEpochInfo,
-            aMembership,
-            aFakeCryptoProviderInstance,
-            origin = OrderingMode.Consensus,
-          )
-        )
-
-        p2pNetworkOutputBuffer should contain only P2PNetworkOut.Network.TopologyUpdate(
-          aMembership
-        )
-
-        // Should have set the new epoch state.
-        stateTransferBehavior should matchPattern {
-          case StateTransferBehavior(
-                _,
-                _,
-                _,
-                `anEpochInfo`,
-                _,
-              ) =>
-        }
-
-        stateTransferBehavior.postponedConsensusMessages.dump shouldBe empty
-
-        verifyNoMoreInteractions(stateTransferManagerMock)
-
-        succeed
-      }
     }
   }
 
@@ -605,6 +546,7 @@ class StateTransferBehaviorTest
             failingCryptoProvider,
             latestCompletedEpochFromStore.lastBlockCommits,
             epochStore.loadEpochProgress(latestEpochFromStore.info)(TraceContext.empty)(),
+            traceContext,
           )
           new EpochState[ProgrammableUnitTestEnv](
             epoch,
@@ -638,7 +580,6 @@ class StateTransferBehaviorTest
         clock,
         metrics,
         moduleRefFactory,
-        new Random(4),
         dependencies,
         loggerFactory,
         timeouts,
@@ -655,6 +596,7 @@ class StateTransferBehaviorTest
           cryptoProvider: CryptoProvider[ProgrammableUnitTestEnv],
           latestCompletedEpochLastCommits: Seq[SignedMessage[Commit]],
           epochInProgress: EpochStore.EpochInProgress,
+          _traceContext: TraceContext,
       )(
           segmentState: SegmentState,
           metricsAccumulator: EpochMetricsAccumulator,

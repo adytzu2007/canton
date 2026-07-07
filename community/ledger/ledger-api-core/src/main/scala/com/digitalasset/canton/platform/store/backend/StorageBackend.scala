@@ -7,7 +7,6 @@ import com.daml.ledger.api.v2.command_completion_service.CompletionStreamRespons
 import com.digitalasset.canton.config.CantonRequireTypes.String185
 import com.digitalasset.canton.data.{CantonTimestamp, Offset}
 import com.digitalasset.canton.ledger.api.ParticipantId
-import com.digitalasset.canton.ledger.participant.state.SynchronizerIndex
 import com.digitalasset.canton.ledger.participant.state.Update.TopologyTransactionEffective.AuthorizationEvent
 import com.digitalasset.canton.ledger.participant.state.index.IndexerPartyDetails
 import com.digitalasset.canton.logging.NamedLoggerFactory
@@ -31,6 +30,7 @@ import com.digitalasset.canton.platform.store.backend.common.{
   UpdateStreamingQueries,
 }
 import com.digitalasset.canton.platform.store.backend.postgresql.PostgresDataSourceConfig
+import com.digitalasset.canton.platform.store.dao.LedgerDaoUpdateReader.DeactivatedContractInfo
 import com.digitalasset.canton.platform.store.dao.PaginatingAsyncStream.IdPageQuery
 import com.digitalasset.canton.platform.store.interning.StringInterning
 import com.digitalasset.canton.topology.SynchronizerId
@@ -39,6 +39,7 @@ import com.digitalasset.daml.lf.data.Ref
 import com.digitalasset.daml.lf.data.Ref.FullIdentifier
 import com.digitalasset.daml.lf.data.Time.Timestamp
 import com.google.common.annotations.VisibleForTesting
+import com.google.protobuf.ByteString
 
 import java.sql.Connection
 import javax.sql.DataSource
@@ -91,7 +92,7 @@ trait IngestionStorageBackend[DbBatch] {
     * @param connection
     *   to be used when inserting the batch
     */
-  def deletePartiallyIngestedData(ledgerEnd: Option[ParameterStorageBackend.LedgerEnd])(
+  def deletePartiallyIngestedData(ledgerEnd: Option[LedgerEnd])(
       connection: Connection
   ): Unit
 }
@@ -105,28 +106,18 @@ trait ParameterStorageBackend {
     *   to be used when updating the parameters table
     */
   def updateLedgerEnd(
-      ledgerEnd: ParameterStorageBackend.LedgerEnd,
-      lastSynchronizerIndex: Map[SynchronizerId, SynchronizerIndex] = Map.empty,
+      ledgerEnd: LedgerEnd
   )(connection: Connection): Unit
 
-  /** Query the current ledger end, read from the parameters table. No significant CPU load, mostly
-    * blocking JDBC communication with the database backend.
+  /** Query the current ledger end, read from the parameters table and clean syncrhonizer index
+    * table. No significant CPU load, mostly blocking JDBC communication with the database backend.
     *
     * @param connection
     *   to be used to get the LedgerEnd
     * @return
     *   the current LedgerEnd
     */
-  def ledgerEnd(connection: Connection): Option[ParameterStorageBackend.LedgerEnd]
-
-  /** The latest SynchronizerIndex for a synchronizerId until all events are processed fully and
-    * published to the Ledger API DB. The Update which from this SynchronizerIndex originate has
-    * smaller or equal offset than the current LedgerEnd: LedgerEnd and SynchronizerIndexes are
-    * persisted consistently in one transaction.
-    */
-  def cleanSynchronizerIndex(synchronizerId: SynchronizerId)(
-      connection: Connection
-  ): Option[SynchronizerIndex]
+  def ledgerEnd(connection: Connection): Option[LedgerEnd]
 
   /** Part of pruning process, this needs to be in the same transaction as the other pruning related
     * database operations
@@ -189,16 +180,6 @@ trait ParameterStorageBackend {
 }
 
 object ParameterStorageBackend {
-  final case class LedgerEnd(
-      lastOffset: Offset,
-      lastEventSeqId: Long,
-      lastStringInterningId: Int,
-      lastPublicationTime: CantonTimestamp,
-  )
-
-  object LedgerEnd {
-    val beforeBegin: Option[ParameterStorageBackend.LedgerEnd] = None
-  }
   final case class IdentityParams(participantId: ParticipantId)
 
   final case class PruneUptoInclusiveAndLedgerEnd(
@@ -292,7 +273,7 @@ trait CompletionStorageBackend {
   def commandCompletions(
       startInclusive: Offset,
       endInclusive: Offset,
-      userId: UserId,
+      userId: Option[UserId],
       parties: Set[Party],
       limit: Int,
   )(connection: Connection): Vector[CompletionStreamResponse]
@@ -484,6 +465,12 @@ trait EventStorageBackend {
       recordTime: CantonTimestamp,
   )(connection: Connection): Option[Offset]
 
+  def fetchAcsCommitments(
+      eventSequentialIds: SequentialIdBatch,
+      synchronizerId: SynchronizerId,
+      descendingOrder: Boolean,
+  )(connection: Connection): Vector[RawAcsCommitment]
+
   def fetchEventPayloadsAcsDelta(target: EventPayloadSourceForUpdatesAcsDelta)(
       eventSequentialIds: SequentialIdBatch,
       requestingPartiesForTx: Option[Set[Party]],
@@ -543,6 +530,10 @@ trait EventStorageBackend {
   def writeLockInternalContractIds(whereInternalContractIdExprs: CompositeSql)(
       connection: Connection
   ): Unit
+
+  def archiveDeactivations(transactionOffsets: Iterable[Offset])(
+      connection: Connection
+  ): Map[Offset, Vector[DeactivatedContractInfo]]
 }
 
 object EventStorageBackend {
@@ -590,8 +581,8 @@ object EventStorageBackend {
 
   sealed trait RawTransactionEvent extends RawEvent with RawUpdateEvent {
     def transactionProperties: TransactionProperties
-    final def externalTransactionHash: Option[Array[Byte]] =
-      transactionProperties.externalTransactionHash
+    final def transactionHash: Option[ByteString] =
+      transactionProperties.transactionHash
 
     def ledgerEffectiveTime: Timestamp
 
@@ -631,7 +622,7 @@ object EventStorageBackend {
   final case class TransactionProperties(
       commonEventProperties: CommonEventProperties,
       commonUpdateProperties: CommonUpdateProperties,
-      externalTransactionHash: Option[Array[Byte]],
+      transactionHash: Option[ByteString],
   )
 
   final case class ReassignmentProperties(
@@ -820,6 +811,16 @@ object EventStorageBackend {
       authorizationEvent: AuthorizationEvent,
       recordTime: Timestamp,
       synchronizerId: String,
+      traceContext: Array[Byte],
+  )
+
+  final case class RawAcsCommitment(
+      offset: Offset,
+      eventSequentialId: Long,
+      updateId: String,
+      synchronizerId: String,
+      recordTime: Timestamp,
+      payload: Array[Byte],
       traceContext: Array[Byte],
   )
 

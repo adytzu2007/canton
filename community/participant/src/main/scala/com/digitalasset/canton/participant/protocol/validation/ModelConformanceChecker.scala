@@ -9,7 +9,6 @@ import cats.implicits.{toFoldableOps, toFunctorOps}
 import cats.syntax.alternative.*
 import cats.syntax.bifunctor.*
 import cats.syntax.parallel.*
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.config.RequireTypes.PositiveInt
 import com.digitalasset.canton.crypto.{Hash, HashOps, HmacOps, InteractiveSubmission}
 import com.digitalasset.canton.data.*
@@ -58,6 +57,7 @@ import com.digitalasset.canton.version.{HashingSchemeVersion, ProtocolVersion}
 import com.digitalasset.canton.{LfPartyId, checked}
 import com.digitalasset.daml.lf.data.Ref.{CommandId, PackageId, PackageName}
 import com.digitalasset.daml.lf.value.GenValue
+import com.digitalasset.nonempty.NonEmpty
 
 import java.util.UUID
 import scala.concurrent.ExecutionContext
@@ -78,6 +78,7 @@ class ModelConformanceChecker(
     packageResolver: PackageResolver,
     contractLookup: ContractLookup,
     parallelism: PositiveInt,
+    protocolVersion: ProtocolVersion,
     validateLegacyContractsV11: Boolean,
     hashOps: HashOps & HmacOps,
     override protected val loggerFactory: NamedLoggerFactory,
@@ -100,12 +101,12 @@ class ModelConformanceChecker(
       commonData: CommonData,
       getEngineAbortStatus: GetEngineAbortStatus,
       reInterpretedTopLevelViews: LazyAsyncReInterpretationMap,
-      // TODO(#29834): Make this a parameter of ModelConformanceChecker as an instance of this is tied to a connected synchronizer and
-      //               implicitly to protocol version
-      protocolVersion: ProtocolVersion,
   )(implicit
       traceContext: TraceContext
   ): EitherT[FutureUnlessShutdown, ErrorWithSubTransaction[ViewEffect], Result] = {
+
+    val transactionMerge: TransactionMerge = TransactionMerge(protocolVersion)
+
     val CommonData(updateId, ledgerTime, preparationTime) = commonData
 
     // Previous checks in Phase 3 ensure that all the root views are sent to the same
@@ -136,6 +137,7 @@ class ModelConformanceChecker(
           ],
       )
     ] = views
+      // TODO(#24573): add and use a parallelism limit
       .parTraverse { case (view, effects, viewPos, submittingParticipantO) =>
         for {
           wfTxE <- checkView(
@@ -203,7 +205,7 @@ class ModelConformanceChecker(
       val (errors, viewsTxs) = errorsAndViewTxs
       val (_, effects, txs) = viewsTxs.unzip3
 
-      val (wftxO, mergeErrorOO) = NonEmpty.from(txs).map(WellFormedTransaction.merge(_)).separate
+      val (wftxO, mergeErrorOO) = NonEmpty.from(txs).map(transactionMerge.merge(_)).separate
       val mergeErrorO = mergeErrorOO.flatten.map(MergeError.apply)
 
       NonEmpty.from(errors ++ mergeErrorO ++ conflictingStoredContractErrors) match {
@@ -243,6 +245,7 @@ class ModelConformanceChecker(
       traceContext: TraceContext
   ): EitherT[FutureUnlessShutdown, Error, Map[PackageName, PackageId]] =
     EitherT(for {
+      // TODO(#24573): add and use a parallelism limit
       resolvedE <- packageIds.toSeq.parTraverse(pId =>
         packageResolver
           .resolve(
@@ -268,6 +271,26 @@ class ModelConformanceChecker(
       } yield nameBindings
     })
 
+  private def externalCallReplayDataFor(
+      view: TransactionView
+  )(implicit
+      traceContext: TraceContext
+  ): ExternalCallReplayData = {
+    val externalCallResults = view.flatten.flatMap { currentView =>
+      currentView.viewParticipantData.unwrap match {
+        case Right(vpd) => vpd.externalCallResults
+        case _ => Seq.empty
+      }
+    }
+    val replayData = ExternalCallReplayData.fromResults(externalCallResults.map(_.result))
+
+    logger.debug(
+      s"reInterpret: Aggregated ${replayData.size} external call result keys"
+    )
+
+    replayData
+  }
+
   def reInterpret(
       view: TransactionView,
       ledgerTime: CantonTimestamp,
@@ -291,6 +314,9 @@ class ModelConformanceChecker(
       view.viewParticipantData.tryUnwrap.keyResolution.fmap(_.unversioned.contracts),
     )
 
+    lazy val externalCallReplayData: ExternalCallReplayData =
+      externalCallReplayDataFor(view)
+
     for {
 
       packagePreference <- buildPackageNameMap(packageIdPreference, topologySnapshot, ledgerTime)
@@ -308,6 +334,7 @@ class ModelConformanceChecker(
           packagePreference,
           failed,
           getEngineAbortStatus,
+          () => externalCallReplayData,
         )(traceContext)
         .leftMap(DAMLeError(_, view.viewHash))
         .leftWiden[Error]
@@ -338,7 +365,6 @@ class ModelConformanceChecker(
   ]] = {
     val submittingParticipantO = submitterMetadataO.map(_.submittingParticipant)
     val viewParticipantData = view.viewParticipantData.tryUnwrap
-
     val rbContext = viewParticipantData.rollbackContext
     for {
       // If we already have the re-interpreted view then re-use it
@@ -376,7 +402,7 @@ class ModelConformanceChecker(
 
       wfTx <- EitherT.fromEither[FutureUnlessShutdown](
         WellFormedTransaction
-          .check(lfTx, metadata, WithoutSuffixes)
+          .check(lfTx, metadata, WithoutSuffixes, RollbackContextFactory(protocolVersion))
           .leftMap[Error](err => TransactionNotWellFormed(err, view.viewHash))
       )
 
@@ -417,7 +443,10 @@ class ModelConformanceChecker(
         ViewReconstructionError(view, reconstructedView): Error,
       )
 
-    } yield WithRollbackScope(rbContext.rollbackScope, suffixedTx)
+    } yield WithRollbackScope(
+      rbContext.rollbackScope,
+      suffixedTx,
+    )
   }
 
   private def checkPackageVetting(
@@ -447,6 +476,7 @@ class ModelConformanceChecker(
           usedPackages.actionNodePackageIds
         }
       unvetted <- informeeParticipants.toSeq
+        // TODO(#24573): add and use a parallelism limit
         .parTraverse(p =>
           snapshot.loadUnvettedPackagesOrDependencies(
             participantId = p,
@@ -531,6 +561,7 @@ object ModelConformanceChecker {
       packageResolver: PackageResolver,
       contractLookup: ContractLookup,
       participantNodeParameters: ParticipantNodeParameters,
+      protocolVersion: ProtocolVersion,
       hashOps: HashOps & HmacOps,
       loggerFactory: NamedLoggerFactory,
   )(implicit executionContext: ExecutionContext): ModelConformanceChecker = {
@@ -546,6 +577,7 @@ object ModelConformanceChecker {
       packageResolver,
       contractLookup,
       parallelism,
+      protocolVersion,
       participantNodeParameters.validateLegacyContractsV11,
       hashOps,
       loggerFactory,
@@ -600,6 +632,7 @@ object ModelConformanceChecker {
         )
 
         enrichedInputContracts <- inputContracts.toList
+          // TODO(#24573): add and use a parallelism limit
           .parTraverse { case (cid, (inst, targetPackageIds)) =>
             contractEnricher((inst, targetPackageIds))(traceContext).map(cid -> _)
           }
@@ -773,13 +806,13 @@ object ModelConformanceChecker {
     *   update id to be used for indexing if the transaction commits
     * @param suffixedTransaction
     *   the merged transaction with suffixed contract ids to use for indexing
-    * @param unmergedTransactionsWithoutToplevelRollbackNodes
+    * @param unmergedTransactionsWithoutTopLevelRollbackNodes
     *   the unmerged root transactions to use for internal lf transaction consistency checks
     */
   final case class Result(
       updateId: UpdateId,
       suffixedTransaction: WellFormedTransaction[WithSuffixesAndMerged],
-      unmergedTransactionsWithoutToplevelRollbackNodes: Seq[LfVersionedTransaction],
+      unmergedTransactionsWithoutTopLevelRollbackNodes: Seq[LfVersionedTransaction],
   )
 
 }

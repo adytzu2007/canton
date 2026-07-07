@@ -6,7 +6,6 @@ package com.digitalasset.canton.integration.plugins
 import better.files.File
 import com.daml.ledger.api.testtool.CliParser
 import com.daml.ledger.api.testtool.runner.{AvailableTests, Config, ConfiguredTests, TestRunner}
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.config.{
   CantonConfig,
   ClientConfig,
@@ -19,16 +18,12 @@ import com.digitalasset.canton.integration.plugins.UseLedgerApiTestTool.{
   LedgerTestTool,
 }
 import com.digitalasset.canton.integration.util.ExternalCommandExecutor
-import com.digitalasset.canton.integration.{
-  ConfigTransforms,
-  EnvironmentSetupPlugin,
-  TestConsoleEnvironment,
-}
+import com.digitalasset.canton.integration.{EnvironmentSetupPlugin, TestConsoleEnvironment}
 import com.digitalasset.canton.logging.{NamedLoggerFactory, NamedLogging, TracedLogger}
-import com.digitalasset.canton.platform.apiserver.SeedService.Seeding
 import com.digitalasset.canton.tracing.{NoTracing, TraceContext}
 import com.digitalasset.canton.version.ReleaseVersion
 import com.digitalasset.daml.lf.language.LanguageVersion
+import com.digitalasset.nonempty.NonEmpty
 import monocle.macros.syntax.lens.*
 import org.scalatest.Assertions
 import org.scalatest.concurrent.ScalaFutures.*
@@ -108,11 +103,10 @@ class UseLedgerApiTestTool(
       case LAPITTVersion.Explicit(release) => tryDownload(release)
     }
 
-    // ensure we use production seeding setting in ledger api conformance and performance tests
-    (ConfigTransforms.updateContractIdSeeding(Seeding.Weak) andThen
-      // static time tests require this
-      (_.focus(_.monitoring.logging.delayLoggingThreshold)
-        .replace(NonNegativeFiniteDurationConfig.ofSeconds(1000))))(config)
+    // static time tests require this
+    config
+      .focus(_.monitoring.logging.delayLoggingThreshold)
+      .replace(NonNegativeFiniteDurationConfig.ofSeconds(1000))
   }
 
   override def afterEnvironmentDestroyed(config: CantonConfig): Unit =

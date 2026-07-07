@@ -6,13 +6,17 @@ package com.digitalasset.canton.synchronizer.sequencing.authentication
 import cats.data.EitherT
 import cats.syntax.bifunctor.*
 import com.daml.nameof.NameOf.functionFullName
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.SequencerCounter
 import com.digitalasset.canton.config.{BatchingConfig, ProcessingTimeout}
 import com.digitalasset.canton.crypto.*
 import com.digitalasset.canton.data.CantonTimestamp
 import com.digitalasset.canton.discard.Implicits.DiscardOps
-import com.digitalasset.canton.lifecycle.{FlagCloseable, FutureUnlessShutdown, UnlessShutdown}
+import com.digitalasset.canton.lifecycle.{
+  FlagCloseable,
+  FutureUnlessShutdown,
+  HasCloseContext,
+  UnlessShutdown,
+}
 import com.digitalasset.canton.logging.{NamedLoggerFactory, NamedLogging}
 import com.digitalasset.canton.sequencing.authentication.MemberAuthentication.*
 import com.digitalasset.canton.sequencing.authentication.grpc.AuthenticationTokenWithExpiry
@@ -25,6 +29,7 @@ import com.digitalasset.canton.topology.transaction.*
 import com.digitalasset.canton.topology.transaction.SignedTopologyTransaction.GenericSignedTopologyTransaction
 import com.digitalasset.canton.tracing.{TraceContext, Traced}
 import com.digitalasset.canton.util.{EitherTUtil, MonadUtil}
+import com.digitalasset.nonempty.NonEmpty
 
 import java.time.Duration
 import scala.concurrent.ExecutionContext
@@ -63,7 +68,8 @@ class MemberAuthenticationService(
     val loggerFactory: NamedLoggerFactory,
 )(implicit ec: ExecutionContext)
     extends NamedLogging
-    with FlagCloseable {
+    with FlagCloseable
+    with HasCloseContext {
 
   /** synchronizer generates nonce that he expects the participant to use to concatenate with the
     * synchronizer's id and sign to proceed with the authentication (step 2). We expect to find a
@@ -139,6 +145,7 @@ class MemberAuthenticationService(
       hash = authentication.hashSynchronizerNonce(nonce, synchronizerId, cryptoApi.pureCrypto)
       snapshot <- EitherT.liftF(cryptoApi.currentSnapshotApproximation)
 
+      // Pre-generation verification
       _ <- snapshot
         .verifySignature(
           hash,
@@ -146,9 +153,13 @@ class MemberAuthenticationService(
           signature,
           SigningKeyUsage.SequencerAuthenticationOnly,
         )
-        .leftMap { err =>
-          logger.warn(s"Member $member provided invalid signature: $err")
-          InvalidSignature(member): AuthenticationError
+        .leftFlatMap {
+          case err: SignatureCheckError.SignatureWithWrongKey =>
+            logger.info(s"Member $member attempted auth with a wrong key. Details: $err")
+            EitherT.leftT[FutureUnlessShutdown, Unit](InvalidSignature(member): AuthenticationError)
+          case err =>
+            logger.info(s"Member $member provided invalid signature. Details: $err")
+            EitherT.leftT[FutureUnlessShutdown, Unit](InvalidSignature(member): AuthenticationError)
         }
       token = AuthenticationToken.generate(cryptoApi.pureCrypto)
       maybeRandomTokenExpirationTime =
@@ -169,7 +180,47 @@ class MemberAuthenticationService(
         token,
         signature.authorizingLongTermKey,
       )
+
+      // Save the token to the database
       _ = store.saveToken(storedToken)
+
+      // Check the active status of the member again. This is required to detect member deactivations that take place
+      // during the running of the validateSignature method, after the initial check. The observed method would miss out
+      // on the corresponding deactivations (through the removal of STC/PSP transactions) because the token would not exist
+      // in the store yet.
+      _ <- isActive(member).leftMap { err =>
+        logger.info(
+          s"Mid-flight member deactivation detected for $member during the running of validateSignature. Rolling back the newly issued token."
+        )
+        // Rollback the newly issued token. The remaining tokens in the store, if any, should have been deactived by the logic in observed.
+        store.invalidateTokensByFingerprint(signature.authorizingLongTermKey)
+        err
+      }
+
+      // Check the active keys of the member again (this was done once during verifySignature).
+      // This is required to detect key revocations that take place
+      // during the running of the validateSignature method, after the initial verifySignature. The observed method would miss out
+      // on the corresponding deactivations (through the removal/replacement of OTK transactions) because the token would not exist
+      // in the store yet.
+      activeKeys <- EitherT.liftF(
+        cryptoApi.headSnapshot.ipsSnapshot
+          .signingKeys(member, SigningKeyUsage.SequencerAuthenticationOnly)
+      )
+
+      _ <- EitherT
+        .cond[FutureUnlessShutdown](
+          activeKeys.exists(_.fingerprint == signature.authorizingLongTermKey),
+          (),
+          InvalidSignature(member): AuthenticationError,
+        )
+        .leftMap { err =>
+          logger.info(
+            s"Mid-flight key revocation detected for $member during the running of validateSignature. Rolling back the newly issued token."
+          )
+          store.invalidateTokensByFingerprint(signature.authorizingLongTermKey)
+          err
+        }
+
     } yield {
       logger.info(
         s"$member authenticated new token with expiry $tokenExpiry"
@@ -239,8 +290,13 @@ class MemberAuthenticationService(
       logger.debug(s"Expiring nonces and tokens up to $now")
       store.expireNoncesAndTokens(now)
     }.onShutdown(())
-
-    clock.scheduleAt(_ => run(), timestamp).discard
+    clock
+      .scheduleAtCancelledOnShutdown(
+        _ => run(),
+        s"${getClass.getName}: scheduling expirations",
+        timestamp,
+      )
+      .discard
   }
 
   private def isActive(

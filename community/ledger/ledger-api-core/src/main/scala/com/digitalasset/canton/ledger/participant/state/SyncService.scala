@@ -4,8 +4,8 @@
 package com.digitalasset.canton.ledger.participant.state
 
 import cats.data.EitherT
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.config.RequireTypes.NonNegativeLong
+import com.digitalasset.canton.crypto.RandomOps
 import com.digitalasset.canton.data.{CantonTimestamp, Offset}
 import com.digitalasset.canton.error.{TransactionError, TransactionRoutingError}
 import com.digitalasset.canton.health.ReportsHealth
@@ -26,6 +26,7 @@ import com.digitalasset.canton.topology.transaction.ParticipantPermission
 import com.digitalasset.canton.topology.{ParticipantId, PhysicalSynchronizerId, SynchronizerId}
 import com.digitalasset.canton.tracing.TraceContext
 import com.digitalasset.canton.{LfPackageId, LfPartyId, SynchronizerAlias}
+import com.digitalasset.nonempty.NonEmpty
 
 /** An interface to change a ledger via a participant. '''Please note that this interface is
   * unstable and may significantly change.'''
@@ -192,6 +193,8 @@ trait SyncService
   )(implicit
       traceContext: TraceContext
   ): EitherT[FutureUnlessShutdown, String, SubmissionCostEstimation]
+
+  def randomOps: RandomOps
 }
 
 object SyncService {

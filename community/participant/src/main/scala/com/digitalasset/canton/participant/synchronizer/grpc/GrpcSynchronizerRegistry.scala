@@ -8,7 +8,6 @@ import cats.data.EitherT
 import cats.syntax.either.*
 import com.daml.grpc.adapter.ExecutionSequencerFactory
 import com.daml.metrics.api.MetricsContext
-import com.daml.nonempty.{NonEmpty, NonEmptyUtil}
 import com.digitalasset.canton.*
 import com.digitalasset.canton.common.sequencer.grpc.SequencerInfoLoader.SequencerAggregatedInfo
 import com.digitalasset.canton.concurrent.{FutureSupervisor, HasFutureSupervision}
@@ -51,10 +50,12 @@ import com.digitalasset.canton.sequencing.client.{
 import com.digitalasset.canton.time.{Clock, WallClock}
 import com.digitalasset.canton.topology.*
 import com.digitalasset.canton.topology.client.SynchronizerTopologyClientWithInit
+import com.digitalasset.canton.topology.transaction.SignedTopologyTransaction.GenericSignedTopologyTransaction
 import com.digitalasset.canton.tracing.TraceContext
 import com.digitalasset.canton.util.Thereafter.syntax.ThereafterAsyncOps
 import com.digitalasset.canton.util.{EitherTUtil, ErrorUtil}
 import com.digitalasset.canton.version.ProtocolVersionCompatibility
+import com.digitalasset.nonempty.{NonEmpty, NonEmptyUtil}
 import io.opentelemetry.api.trace.Tracer
 import org.apache.pekko.stream.Materializer
 
@@ -140,7 +141,8 @@ class GrpcSynchronizerRegistry(
   }
 
   override def connect(
-      storedConfig: StoredSynchronizerConnectionConfig
+      storedConfig: StoredSynchronizerConnectionConfig,
+      onboardingTransactions: Option[NonEmpty[Seq[GenericSignedTopologyTransaction]]],
   )(implicit
       traceContext: TraceContext
   ): FutureUnlessShutdown[
@@ -163,6 +165,7 @@ class GrpcSynchronizerRegistry(
         syncPersistentStateManager,
         info,
         connectionPool,
+        onboardingTransactions,
       )(
         cryptoApiProvider,
         clock,
@@ -231,7 +234,9 @@ class GrpcSynchronizerRegistry(
         .connectedSynchronizerMetrics(storedConfig.config.synchronizerAlias)
         .sequencerClient
         .connectionPool,
-      metricsContext = MetricsContext.Empty,
+      metricsContext = storedConfig.configuredPsid.toOption
+        .map(psid => MetricsContext("psid" -> psid.toProtoPrimitive))
+        .getOrElse(MetricsContext.Empty),
       futureSupervisor = futureSupervisor,
       timeouts = timeouts,
       loggerFactory = synchronizerLoggerFactory,

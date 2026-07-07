@@ -4,8 +4,6 @@
 package com.digitalasset.canton.topology.store.memory
 
 import cats.syntax.functorFilter.*
-import com.daml.nonempty.NonEmpty
-import com.daml.nonempty.NonEmptyReturningOps.`NE Iterable Ops`
 import com.digitalasset.canton.config.CantonRequireTypes.{String185, String300}
 import com.digitalasset.canton.config.ProcessingTimeout
 import com.digitalasset.canton.config.RequireTypes.PositiveInt
@@ -41,6 +39,8 @@ import com.digitalasset.canton.topology.transaction.TopologyTransaction.{
 import com.digitalasset.canton.tracing.TraceContext
 import com.digitalasset.canton.util.{ErrorUtil, Mutex, PekkoUtil}
 import com.digitalasset.canton.version.ProtocolVersion
+import com.digitalasset.nonempty.NonEmpty
+import com.digitalasset.nonempty.NonEmptyReturningOps.`NE Iterable Ops`
 import com.google.common.annotations.VisibleForTesting
 import org.apache.pekko.NotUsed
 import org.apache.pekko.stream.Materializer
@@ -601,6 +601,29 @@ class InMemoryTopologyStore[+StoreId <: TopologyStoreId](
         .runFold(TopologyStateHash.build())(_.add(_))
         .map(_.finish().hash)
     )
+
+  override def filterProvidesAdditionalSignatures(
+      transactions: Seq[GenericSignedTopologyTransaction]
+  )(implicit
+      traceContext: TraceContext
+  ): FutureUnlessShutdown[Seq[GenericSignedTopologyTransaction]] =
+    FutureUnlessShutdown.wrap {
+      lock.exclusive {
+        transactions.filter { tx =>
+          val inStoreOpt = topologyTransactionStore
+            .findLast { entry =>
+              entry.transaction.hash == tx.hash &&
+              entry.from.value < CantonTimestamp.MaxValue &&
+              entry.rejected.isEmpty
+            }
+            .map(_.toStoredTransaction)
+
+          inStoreOpt.forall { inStore =>
+            TopologyStore.providesAdditionalSignatures(tx, inStore)
+          }
+        }
+      }
+    }
 
   override def findUpcomingEffectiveChanges(asOfInclusive: CantonTimestamp)(implicit
       traceContext: TraceContext

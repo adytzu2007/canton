@@ -20,6 +20,7 @@ import com.daml.ledger.api.v2.admin.party_management_service.*
 import com.daml.ledger.api.v2.command_completion_service.{
   CompletionStreamRequest,
   CompletionStreamResponse,
+  GetCompletionsRequest,
 }
 import com.daml.ledger.api.v2.command_service.{
   SubmitAndWaitForTransactionRequest,
@@ -58,6 +59,7 @@ import com.daml.ledger.api.v2.state_service.{
   GetActiveContractsPageResponse,
   GetActiveContractsRequest,
   GetActiveContractsResponse,
+  GetLedgerEndResponse,
 }
 import com.daml.ledger.api.v2.topology_transaction.TopologyTransaction
 import com.daml.ledger.api.v2.transaction.Transaction
@@ -580,6 +582,12 @@ class TimeoutParticipantTestContext(timeoutScaleFactor: Double, delegate: Partic
       delegate.updateById(request),
     )
 
+  override def updateByHash(request: GetUpdateByHashRequest): Future[GetUpdateResponse] =
+    withTimeout(
+      s"Update by hash for request $request",
+      delegate.updateByHash(request),
+    )
+
   override def transactionById(
       updateId: String,
       parties: Seq[Party],
@@ -588,6 +596,16 @@ class TimeoutParticipantTestContext(timeoutScaleFactor: Double, delegate: Partic
   ): Future[Transaction] = withTimeout(
     s"Transaction by id for update id $updateId, parties $parties and templates $templateIds",
     delegate.transactionById(updateId, parties, transactionShape, templateIds),
+  )
+
+  override def transactionByHash(
+      hash: ByteString,
+      parties: Seq[Party],
+      transactionShape: TransactionShape,
+      templateIds: Seq[Identifier],
+  ): Future[Transaction] = withTimeout(
+    s"Transaction by hash, parties $parties and templates $templateIds",
+    delegate.transactionByHash(hash, parties, transactionShape, templateIds),
   )
 
   def topologyTransactionById(
@@ -819,6 +837,32 @@ class TimeoutParticipantTestContext(timeoutScaleFactor: Double, delegate: Partic
       p: Completion => Boolean
   ): Future[Option[Completion]] =
     withTimeout(s"Find completion for parties $parties", delegate.findCompletion(parties*)(p))
+
+  // GetCompletions helpers (delegating). Kept separate from completionStream on purpose; the latter
+  // is deprecated and will be removed.
+  override def getCompletionsRequest(from: Long)(
+      parties: Party*
+  ): GetCompletionsRequest = delegate.getCompletionsRequest(from)(parties*)
+
+  override def completions(
+      within: NonNegativeFiniteDuration,
+      request: GetCompletionsRequest,
+  ): Future[Vector[CompletionStreamResponse.CompletionResponse]] =
+    delegate.completions(within, request)
+
+  override def completions(
+      take: Int,
+      request: GetCompletionsRequest,
+  ): Future[Vector[CompletionStreamResponse.CompletionResponse]] =
+    delegate.completions(take, request)
+
+  override def findCompletion(request: GetCompletionsRequest)(
+      p: Completion => Boolean
+  ): Future[Option[Completion]] = withTimeout(
+    s"Find completion for request $request",
+    delegate.findCompletion(request)(p),
+  )
+
   override def offsets(n: Int, request: CompletionStreamRequest): Future[Vector[Long]] =
     withTimeout(s"$n checkpoints for request $request", delegate.offsets(n, request))
   override def checkHealth(): Future[HealthCheckResponse] =
@@ -908,4 +952,9 @@ class TimeoutParticipantTestContext(timeoutScaleFactor: Double, delegate: Partic
       s"Flat transactions for request $request",
       delegate.transactionsWithVariants(request, clue),
     )
+
+  override def getLedgerEnd(): Future[GetLedgerEndResponse] = withTimeout(
+    "Get ledger end request",
+    delegate.getLedgerEnd(),
+  )
 }

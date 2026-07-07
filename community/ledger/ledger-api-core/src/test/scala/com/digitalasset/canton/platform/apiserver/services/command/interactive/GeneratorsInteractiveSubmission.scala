@@ -26,7 +26,7 @@ import com.digitalasset.daml.lf.data.{Bytes, ImmArray, Time}
 import com.digitalasset.daml.lf.transaction.{
   CreationTime,
   FatContractInstance,
-  GlobalKey,
+  GlobalKeyWithMaintainers,
   Node,
   NodeId,
   SerializationVersion as LfSerializationVersion,
@@ -109,11 +109,9 @@ final class GeneratorsInteractiveSubmission(
       node
         .copy(
           keyOpt = node.keyOpt.map { globalKeyWithMaintainers =>
-            globalKeyWithMaintainers.copy(
-              globalKey = GlobalKey.assertWithRenormalizedValue(
-                globalKeyWithMaintainers.globalKey,
-                normalizeValue(globalKeyWithMaintainers.globalKey.key),
-              )
+            GlobalKeyWithMaintainers.assertWithRenormalizedValue(
+              globalKeyWithMaintainers,
+              normalizeValue(globalKeyWithMaintainers.globalKey.key),
             )
           }
         )
@@ -121,11 +119,9 @@ final class GeneratorsInteractiveSubmission(
     case node: Node.QueryByKey =>
       node
         .copy(
-          key = node.key.copy(
-            globalKey = GlobalKey.assertWithRenormalizedValue(
-              node.key.globalKey,
-              normalizeValue(node.key.globalKey.key),
-            )
+          key = GlobalKeyWithMaintainers.assertWithRenormalizedValue(
+            node.key,
+            normalizeValue(node.key.globalKey.key),
           )
         )
         .asInstanceOf[N]
@@ -212,6 +208,7 @@ final class GeneratorsInteractiveSubmission(
     deduplicationPeriod,
     submissionIdO,
     externallySignedSubmission = None,
+    transactionHash = None,
   )
 
   private def transactionMetaGen(transaction: VersionedTransaction): Gen[TransactionMeta] = for {

@@ -110,6 +110,19 @@ final class IndexServiceOwner(
         loggerFactory = loggerFactory,
       )(queryExecutionContext)
 
+      acsChangesReader = new AcsChangesReader(
+        updatesReader = bufferedTransactionsReader,
+        dbDispatcher = dbSupport.dbDispatcher,
+        eventStorageBackend = dbSupport.storageBackendFactory
+          .readStorageBackend(
+            inMemoryState.ledgerEndCache,
+            inMemoryState.stringInterningView,
+            loggerFactory,
+          )
+          .eventStorageBackend,
+        metrics = metrics,
+      )(commandExecutionContext)
+
       bufferedCommandCompletionsReader = BufferedCommandCompletionsReader(
         inMemoryFanoutBuffer = inMemoryState.inMemoryFanoutBuffer,
         delegate = ledgerDao.completions,
@@ -121,6 +134,7 @@ final class IndexServiceOwner(
         participantId = participantId,
         ledgerDao = ledgerDao,
         updatesReader = bufferedTransactionsReader,
+        acsChangesReader = acsChangesReader,
         commandCompletionsReader = bufferedCommandCompletionsReader,
         contractStore = contractStore,
         pruneBuffers = inMemoryState.inMemoryFanoutBuffer.prune,
@@ -133,6 +147,7 @@ final class IndexServiceOwner(
         getPreferredPackages = getPackagePreference,
         materializer = materializer,
         executionContext = commandExecutionContext,
+        ledgerEndCache = inMemoryState.ledgerEndCache,
         updateServiceConfig = updateServiceConfig,
       )
     } yield new TimedIndexService(indexService, metrics)

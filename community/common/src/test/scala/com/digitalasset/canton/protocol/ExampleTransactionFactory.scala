@@ -8,7 +8,6 @@ import cats.syntax.either.*
 import cats.syntax.functor.*
 import cats.syntax.functorFilter.*
 import cats.syntax.option.*
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton
 import com.digitalasset.canton.*
 import com.digitalasset.canton.BaseTest.*
@@ -57,6 +56,7 @@ import com.digitalasset.daml.lf.language.LanguageVersion
 import com.digitalasset.daml.lf.transaction.{CreationTime, FatContractInstance, Versioned}
 import com.digitalasset.daml.lf.value.Value
 import com.digitalasset.daml.lf.value.Value.*
+import com.digitalasset.nonempty.NonEmpty
 import org.scalatest.EitherValues
 
 import java.time.Duration as JDuration
@@ -169,7 +169,7 @@ object ExampleTransactionFactory {
   ): Versioned[LfGlobalKey] =
     LfVersioned(
       serializationVersion,
-      LfGlobalKey.assertBuild(
+      LfGlobalKey(
         templateId,
         packageName,
         value,
@@ -530,6 +530,7 @@ class ExampleTransactionFactory(
     extends EitherValues {
 
   private val protocolVersion = versionOverride.getOrElse(BaseTest.testedProtocolVersion)
+  private val rollbackContextFactory = RollbackContextFactory(protocolVersion)
   private val random = new Random(0)
 
   private def createNewView(
@@ -540,7 +541,7 @@ class ExampleTransactionFactory(
       isRoot: Boolean,
   ): FutureUnlessShutdown[NewView] = {
 
-    val rootRbContext = RollbackContext.empty
+    val rootRbContext = rollbackContextFactory.empty
 
     val submittingAdminPartyO =
       Option.when(isRoot)(submitterMetadata.submittingParticipant.adminParty.toLf)
@@ -767,7 +768,7 @@ class ExampleTransactionFactory(
       consumed: Set[LfContractId],
       coreInputs: Seq[GenContractInstance],
       created: Seq[NewContractInstance],
-      resolvedKeys: Map[LfGlobalKey, LfVersioned[KeyResolutionWithMaintainers]],
+      keyResolution: Map[LfGlobalKey, LfVersioned[KeyResolutionWithMaintainers]],
       seed: Option[LfHash],
       packagePreference: Set[LfPackageId],
       subviews: Seq[TransactionView],
@@ -779,7 +780,7 @@ class ExampleTransactionFactory(
         protocolVersion,
       )
 
-    val createWithSerialization = created.map { contract =>
+    val createdContracts = created.map { contract =>
       val coid = contract.contractId
       CreatedContract.tryCreate(
         contract,
@@ -808,16 +809,17 @@ class ExampleTransactionFactory(
         packagePreference = packagePreference,
       )
 
-    val viewParticipantData = ViewParticipantData.tryCreate(
-      coreInputContracts,
-      createWithSerialization,
-      createdInSubviewArchivedInCore,
-      resolvedKeys,
-      actionDescription,
-      RollbackContext.empty,
-      participantDataSalt(viewIndex),
-      ImmArray.Empty,
-    )(cryptoOps, protocolVersion, None)
+    val viewParticipantData = ViewParticipantData.tryCreate(cryptoOps)(
+      coreInputs = coreInputContracts,
+      createdCore = createdContracts,
+      createdInSubviewArchivedInCore = createdInSubviewArchivedInCore,
+      keyResolution = keyResolution,
+      actionDescription = actionDescription,
+      rollbackContext = rollbackContextFactory.empty,
+      salt = participantDataSalt(viewIndex),
+      externalCallResults = Seq.empty,
+      protocolVersion = protocolVersion,
+    )
 
     val subViews = TransactionSubviews(subviews)(protocolVersion, cryptoOps)
     TransactionView.tryCreate(cryptoOps)(
@@ -834,7 +836,7 @@ class ExampleTransactionFactory(
       consumed: Set[LfContractId],
       coreInputs: Seq[GenContractInstance],
       created: Seq[NewContractInstance],
-      resolvedKeys: Map[LfGlobalKey, LfVersioned[KeyResolutionWithMaintainers]],
+      keyResolution: Map[LfGlobalKey, LfVersioned[KeyResolutionWithMaintainers]],
       seed: Option[LfHash],
       isRoot: Boolean,
       packagePreference: Set[LfPackageId],
@@ -860,7 +862,7 @@ class ExampleTransactionFactory(
       consumed,
       coreInputs,
       created,
-      resolvedKeys,
+      keyResolution,
       seed,
       packagePreference,
       subviews,
@@ -874,7 +876,7 @@ class ExampleTransactionFactory(
       consumed: Set[LfContractId],
       coreInputs: Seq[ContractInstance],
       created: Seq[NewContractInstance],
-      resolvedKeys: Map[LfGlobalKey, LfVersioned[KeyResolutionWithMaintainers]],
+      keyResolution: Map[LfGlobalKey, LfVersioned[KeyResolutionWithMaintainers]],
       seed: Option[LfHash],
       isRoot: Boolean,
       packagePreference: Set[LfPackageId],
@@ -918,7 +920,7 @@ class ExampleTransactionFactory(
       consumed,
       coreInputs,
       created,
-      resolvedKeys,
+      keyResolution,
       seed,
       packagePreference,
       subviews,
@@ -1928,10 +1930,14 @@ class ExampleTransactionFactory(
        * informee participants (i.e. party <<extra>> is hosted in the <<extraParticipant>>)
        */
       val v1TailNodes = Seq(
-        SameView(lfCreate10, LfNodeId(2), RollbackContext.empty),
-        SameView(lfFetch11, LfNodeId(3), RollbackContext.empty),
+        SameView(lfCreate10, LfNodeId(2), rollbackContextFactory.empty),
+        SameView(lfFetch11, LfNodeId(3), rollbackContextFactory.empty),
         v10,
-        SameView(LfTransactionUtil.lightWeight(lfExercise13), LfNodeId(5), RollbackContext.empty),
+        SameView(
+          LfTransactionUtil.lightWeight(lfExercise13),
+          LfNodeId(5),
+          rollbackContextFactory.empty,
+        ),
       )
 
       val v1Pre =
@@ -2382,10 +2388,14 @@ class ExampleTransactionFactory(
       )
 
       val v1TailNodes = Seq(
-        SameView(lfCreate10, LfNodeId(2), RollbackContext.empty),
-        SameView(lfFetch11, LfNodeId(3), RollbackContext.empty),
-        SameView(lfCreate12, LfNodeId(4), RollbackContext.empty),
-        SameView(LfTransactionUtil.lightWeight(lfExercise13), LfNodeId(5), RollbackContext.empty),
+        SameView(lfCreate10, LfNodeId(2), rollbackContextFactory.empty),
+        SameView(lfFetch11, LfNodeId(3), rollbackContextFactory.empty),
+        SameView(lfCreate12, LfNodeId(4), rollbackContextFactory.empty),
+        SameView(
+          LfTransactionUtil.lightWeight(lfExercise13),
+          LfNodeId(5),
+          rollbackContextFactory.empty,
+        ),
         v10,
         v11,
       )
@@ -2923,9 +2933,9 @@ class ExampleTransactionFactory(
         LfNodeId(1),
         Seq(
           v10,
-          SameView(lfCreate11, LfNodeId(4), RollbackContext.empty),
+          SameView(lfCreate11, LfNodeId(4), rollbackContextFactory.empty),
           v11,
-          SameView(lfCreate13, LfNodeId(7), RollbackContext.empty),
+          SameView(lfCreate13, LfNodeId(7), rollbackContextFactory.empty),
         ),
         isRoot = true,
       )
@@ -3470,7 +3480,7 @@ class ExampleTransactionFactory(
         LfTransactionUtil.lightWeight(lfExercise11),
         Some(exercise11seed),
         LfNodeId(3),
-        Seq(SameView(lfCreate110, LfNodeId(4), RollbackContext.empty)),
+        Seq(SameView(lfCreate110, LfNodeId(4), rollbackContextFactory.empty)),
         isRoot = false,
       )
 
@@ -3479,10 +3489,18 @@ class ExampleTransactionFactory(
         Some(exercise1seed),
         LfNodeId(1),
         Seq(
-          SameView(lfCreate10, LfNodeId(2), RollbackContext.empty),
+          SameView(lfCreate10, LfNodeId(2), rollbackContextFactory.empty),
           v10,
-          SameView(LfTransactionUtil.lightWeight(lfExercise12), LfNodeId(5), RollbackContext.empty),
-          SameView(LfTransactionUtil.lightWeight(lfExercise13), LfNodeId(6), RollbackContext.empty),
+          SameView(
+            LfTransactionUtil.lightWeight(lfExercise12),
+            LfNodeId(5),
+            rollbackContextFactory.empty,
+          ),
+          SameView(
+            LfTransactionUtil.lightWeight(lfExercise13),
+            LfNodeId(6),
+            rollbackContextFactory.empty,
+          ),
         ),
         isRoot = true,
       )

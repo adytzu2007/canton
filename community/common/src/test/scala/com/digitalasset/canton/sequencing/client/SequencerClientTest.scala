@@ -7,7 +7,6 @@ import cats.data.EitherT
 import cats.syntax.either.*
 import cats.syntax.foldable.*
 import com.daml.metrics.api.MetricsContext
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.base.error.ErrorCode
 import com.digitalasset.base.error.utils.DecodedCantonError
 import com.digitalasset.canton.*
@@ -46,6 +45,7 @@ import com.digitalasset.canton.protocol.{
   TestSynchronizerParameters,
   v30,
   v31,
+  v32,
 }
 import com.digitalasset.canton.sequencing.*
 import com.digitalasset.canton.sequencing.client.SendAsyncClientError.SendAsyncClientResponseError
@@ -115,6 +115,7 @@ import com.digitalasset.canton.version.{
   ProtocolVersion,
   RepresentativeProtocolVersion,
 }
+import com.digitalasset.nonempty.NonEmpty
 import io.grpc.Status
 import org.apache.pekko.actor.ActorSystem
 import org.apache.pekko.stream.scaladsl.{Keep, Source}
@@ -1832,7 +1833,7 @@ final class SequencerClientTest
     override protected def loggerFactory: NamedLoggerFactory =
       SequencerClientTest.this.loggerFactory
 
-    override def physicalSynchronizerIdO: Option[PhysicalSynchronizerId] = ???
+    override def physicalSynchronizerIdO: Option[PhysicalSynchronizerId] = None
 
     override def staticSynchronizerParametersO: Option[StaticSynchronizerParameters] = ???
 
@@ -1894,6 +1895,8 @@ final class SequencerClientTest
     )(implicit
         traceContext: TraceContext
     ): Either[SequencerConnectionPoolError.ThresholdUnreachableError, Unit] = Either.unit
+
+    override val metricsContext: MetricsContext = MetricsContext.Empty
   }
 
   private object MockPool {
@@ -2053,6 +2056,9 @@ final class SequencerClientTest
 
     override def toProtoSomeEnvelopeContentV31: v31.EnvelopeContent.SomeEnvelopeContent =
       v31.EnvelopeContent.SomeEnvelopeContent.Empty
+
+    override def toProtoSomeEnvelopeContentV32: v32.EnvelopeContent.SomeEnvelopeContent =
+      v32.EnvelopeContent.SomeEnvelopeContent.Empty
 
     override def productElement(n: Int): Any = fail("shouldn't be used")
     override def productArity: Int = fail("shouldn't be used")

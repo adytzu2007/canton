@@ -30,11 +30,14 @@ import com.digitalasset.canton.synchronizer.sequencer.block.bftordering.core.Bft
   DefaultBlockingDbReadTimeout,
   DefaultConsensusBlockCompletionTimeout,
   DefaultConsensusEmptyBlockCreationTimeout,
+  DefaultConsensusNewEpochTopologyWarnTimeout,
   DefaultConsensusQueueMaxSize,
   DefaultConsensusQueuePerNodeQuota,
   DefaultDedicatedExecutionContextDivisor,
   DefaultDelayedInitQueueMaxSize,
   DefaultEpochStateTransferTimeout,
+  DefaultInitQueryTimeout,
+  DefaultInitTimeout,
   DefaultMaxBatchCreationInterval,
   DefaultMaxBatchesPerProposal,
   DefaultMaxMempoolQueueSize,
@@ -106,6 +109,11 @@ import scala.concurrent.duration.*
   *   advances at a regular frequency. Note that due to (i), it is recommended that this
   *   consensusEmptyBlockCreationTimeout be substantially less than the
   *   consensusBlockCompletionTimeout to account for latency, retransmissions, etc.
+  * @param consensusNewEpochTopologyWarnTimeout
+  *   The time that nodes will wait at the start of a new epoch for the topology to be activated. If
+  *   the timeout is reached, the node will create a warning log to indicate the reason for delay in
+  *   progress was the topology activation, but the node will continue to wait for the topology to
+  *   be activated.
   * @param delayedInitQueueMaxSize
   *   The maximum size of the delayed init queue. This queue is used by modules to save incoming
   *   events in memory while the module is still initializing. Once startup is complete, the module
@@ -181,6 +189,8 @@ final case class BftBlockOrdererConfig(
     consensusQueuePerNodeQuota: Int = DefaultConsensusQueuePerNodeQuota,
     consensusBlockCompletionTimeout: FiniteDuration = DefaultConsensusBlockCompletionTimeout,
     consensusEmptyBlockCreationTimeout: FiniteDuration = DefaultConsensusEmptyBlockCreationTimeout,
+    consensusNewEpochTopologyWarnTimeout: FiniteDuration =
+      DefaultConsensusNewEpochTopologyWarnTimeout,
     delayedInitQueueMaxSize: Int = DefaultDelayedInitQueueMaxSize,
     epochStateTransferRetryTimeout: FiniteDuration = DefaultEpochStateTransferTimeout,
     outputFetchTimeout: FiniteDuration = DefaultOutputFetchTimeout,
@@ -199,14 +209,22 @@ final case class BftBlockOrdererConfig(
     dedicatedExecutionContextDivisor: Option[Int] = DefaultDedicatedExecutionContextDivisor,
     sequencerCoreSubscriptionConfig: SequencerCoreSubscriptionConfig =
       DefaultSequencerCoreSubscriptionConfig,
+    initTimeout: config.NonNegativeFiniteDuration = DefaultInitTimeout,
+    initQueryTimeout: config.NonNegativeFiniteDuration = DefaultInitQueryTimeout,
 ) {
   private val maxRequestsPerBlock = maxBatchesPerBlockProposal * maxRequestsInBatch
+
   require(
     maxRequestsPerBlock < BftTime.MaxRequestsPerBlock,
     s"Maximum block size too big: $maxRequestsInBatch maximum requests per batch and " +
       s"$maxBatchesPerBlockProposal maximum batches per block proposal means " +
       s"$maxRequestsPerBlock maximum requests per block, " +
       s"but the maximum number allowed of requests per block is ${BftTime.MaxRequestsPerBlock}",
+  )
+
+  require(
+    initTimeout.underlying >= initQueryTimeout.underlying,
+    s"initTimeout $initTimeout must be >= initQueryTimeout $initQueryTimeout",
   )
 }
 
@@ -229,8 +247,9 @@ object BftBlockOrdererConfig {
   val DefaultConsensusQueuePerNodeQuota: Int = 1024
   val DefaultConsensusBlockCompletionTimeout: FiniteDuration = 10.seconds
   val DefaultConsensusEmptyBlockCreationTimeout: FiniteDuration = 5.seconds
+  val DefaultConsensusNewEpochTopologyWarnTimeout: FiniteDuration = 2.seconds
   val DefaultDelayedInitQueueMaxSize: Int = 1024
-  val DefaultEpochStateTransferTimeout: FiniteDuration = 10.seconds
+  val DefaultEpochStateTransferTimeout: FiniteDuration = 4.seconds
   val DefaultOutputFetchTimeout: FiniteDuration = 500.milliseconds
   val DefaultOutputFetchMinimumDelay: FiniteDuration = 500.milliseconds
   val DefaultOutputFetchTimeoutCap: FiniteDuration = 5.second
@@ -246,6 +265,11 @@ object BftBlockOrdererConfig {
 
   val DefaultSequencerCoreSubscriptionConfig: SequencerCoreSubscriptionConfig =
     SequencerCoreSubscriptionConfig()
+
+  val DefaultInitTimeout: config.NonNegativeFiniteDuration =
+    config.NonNegativeFiniteDuration(10.minutes)
+  val DefaultInitQueryTimeout: config.NonNegativeFiniteDuration =
+    config.NonNegativeFiniteDuration(5.minutes)
 
   /** Configuration for peer-to-peer network settings
     *

@@ -17,12 +17,13 @@ import com.daml.ledger.api.v2.reassignment.{
 import com.daml.ledger.api.v2.topology_transaction.TopologyTransaction
 import com.daml.ledger.api.v2.transaction.Transaction as FlatTransaction
 import com.daml.ledger.api.v2.update_service.{GetUpdateResponse, GetUpdatesResponse}
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.data.Offset
 import com.digitalasset.canton.ledger.api.TransactionShape.{AcsDelta, LedgerEffects}
 import com.digitalasset.canton.ledger.api.util.{LfEngineToApi, TimestampConversion}
 import com.digitalasset.canton.ledger.api.{ParticipantAuthorizationFormat, TransactionShape}
 import com.digitalasset.canton.ledger.participant.state.Reassignment
+import com.digitalasset.canton.ledger.participant.state.index.IndexUpdateService
+import com.digitalasset.canton.ledger.participant.state.index.IndexUpdateService.UpdateResponse
 import com.digitalasset.canton.logging.LoggingContextWithTrace
 import com.digitalasset.canton.platform.store.ScalaPbStreamingOptimizations.*
 import com.digitalasset.canton.platform.store.backend.common.EventStorageBackendTemplate
@@ -52,6 +53,7 @@ import com.digitalasset.daml.lf.transaction.{
   GlobalKeyWithMaintainers,
   Node,
 }
+import com.digitalasset.nonempty.NonEmpty
 
 import scala.concurrent.{ExecutionContext, Future}
 
@@ -115,15 +117,20 @@ private[events] object TransactionLogUpdatesConversions {
             u.copy(events = filteredEvents)(u.traceContext)
           )
         }
+
+    case commitment: TransactionLogUpdate.ReceivedAcsCommitment =>
+      Option.when(
+        internalUpdateFormat.includeAcsCommitments.contains(commitment.update.synchronizerId)
+      )(commitment)
   }
 
-  def toGetUpdatesResponse(
+  def toUpdateResponse(
       internalUpdateFormat: InternalUpdateFormat,
       lfValueTranslation: LfValueTranslation,
   )(implicit
       loggingContext: LoggingContextWithTrace,
       executionContext: ExecutionContext,
-  ): TransactionLogUpdate => Future[GetUpdatesResponse] = {
+  ): TransactionLogUpdate => Future[UpdateResponse] = {
     case transactionAccepted: TransactionLogUpdate.TransactionAccepted =>
       val internalTransactionFormat = internalUpdateFormat.includeTransactions
         .getOrElse(
@@ -137,8 +144,10 @@ private[events] object TransactionLogUpdatesConversions {
         lfValueTranslation,
       )
         .map(transaction =>
-          GetUpdatesResponse(GetUpdatesResponse.Update.Transaction(transaction))
-            .withPrecomputedSerializedSize()
+          UpdateResponse.ProtoUpdate(
+            GetUpdatesResponse(GetUpdatesResponse.Update.Transaction(transaction))
+              .withPrecomputedSerializedSize()
+          )
         )
 
     case reassignmentAccepted: TransactionLogUpdate.ReassignmentAccepted =>
@@ -155,14 +164,32 @@ private[events] object TransactionLogUpdatesConversions {
         lfValueTranslation,
       )
         .map(reassignment =>
-          GetUpdatesResponse(GetUpdatesResponse.Update.Reassignment(reassignment))
-            .withPrecomputedSerializedSize()
+          UpdateResponse.ProtoUpdate(
+            GetUpdatesResponse(GetUpdatesResponse.Update.Reassignment(reassignment))
+              .withPrecomputedSerializedSize()
+          )
         )
 
     case topologyTransaction: TransactionLogUpdate.TopologyTransactionEffective =>
       toTopologyTransaction(topologyTransaction).map(transaction =>
-        GetUpdatesResponse(GetUpdatesResponse.Update.TopologyTransaction(transaction))
-          .withPrecomputedSerializedSize()
+        UpdateResponse.ProtoUpdate(
+          GetUpdatesResponse(GetUpdatesResponse.Update.TopologyTransaction(transaction))
+            .withPrecomputedSerializedSize()
+        )
+      )
+
+    case commitment: TransactionLogUpdate.ReceivedAcsCommitment =>
+      Future.successful(
+        UpdateResponse.AcsCommitment(
+          IndexUpdateService.ReceivedAcsCommitment(
+            offset = commitment.offset,
+            updateId = commitment.update.updateId.toHexString,
+            synchronizerId = commitment.update.synchronizerId.toProtoPrimitive,
+            recordTime = commitment.update.recordTime.toLf,
+            payload = commitment.update.payload,
+            traceContext = commitment.traceContext,
+          )
+        )
       )
 
     case illegal => throw new IllegalStateException(s"$illegal is not expected here")
@@ -253,8 +280,9 @@ private[events] object TransactionLogUpdatesConversions {
             synchronizerId = transactionAccepted.synchronizerId,
             traceContext = SerializableTraceContext(transactionAccepted.traceContext).toDamlProto,
             recordTime = Some(TimestampConversion.fromLf(transactionAccepted.recordTime)),
-            externalTransactionHash = transactionAccepted.externalTransactionHash.map(_.unwrap),
+            externalTransactionHash = transactionAccepted.transactionHash.map(_.unwrap),
             paidTrafficCost = transactionAccepted.paidTrafficCost(requestingParties),
+            transactionHash = transactionAccepted.transactionHash.map(_.unwrap),
           )
         )
     }
@@ -467,7 +495,7 @@ private[events] object TransactionLogUpdatesConversions {
   ): Future[apiEvent.CreatedEvent] = {
     val keyOpt = createdEvent.keyInfo
       .map { keyInfo =>
-        GlobalKeyWithMaintainers.assertBuild(
+        GlobalKeyWithMaintainers(
           templateId = createdEvent.templateId,
           value = keyInfo.value.unversioned,
           valueHash = keyInfo.hash,

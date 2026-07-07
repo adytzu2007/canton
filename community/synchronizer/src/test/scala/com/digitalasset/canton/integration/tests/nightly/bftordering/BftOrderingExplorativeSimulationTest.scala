@@ -3,7 +3,6 @@
 
 package com.digitalasset.canton.integration.tests.nightly.bftordering
 
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.config.RequireTypes.PositiveLong
 import com.digitalasset.canton.logging.LogEntry
 import com.digitalasset.canton.synchronizer.sequencer.block.bftordering.framework.data.topology.SequencingParameters.SegmentLength
@@ -18,6 +17,7 @@ import com.digitalasset.canton.synchronizer.sequencer.block.bftordering.simulati
   SimulationTestStageSettings,
   TopologySettings,
 }
+import com.digitalasset.nonempty.NonEmpty
 import org.scalatest.Assertion
 
 import scala.collection.immutable.TreeMap
@@ -40,7 +40,14 @@ class BftOrderingExplorativeSimulationTest extends BftOrderingSimulationTest {
         "but it cannot be verified in the currently known dissemination topology"
       )
       logEntry.loggerName should include("AvailabilityModule")
-    }
+    },
+    // We might get messages about waiting for new topology after epoch completion, don't count these as errors.
+    { logEntry =>
+      logEntry.message should include(
+        "Waiting for new topology after epoch completion"
+      )
+      logEntry.loggerName should include("IssConsensusModule")
+    },
   )
 
   private val zeroProbability: Probability = Probability(0)

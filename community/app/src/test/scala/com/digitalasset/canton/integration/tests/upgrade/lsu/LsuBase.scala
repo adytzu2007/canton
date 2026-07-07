@@ -11,6 +11,7 @@ import com.digitalasset.canton.admin.api.client.data.{
   SubscriptionLivenessLimits,
   SynchronizerConnectionConfig,
 }
+import com.digitalasset.canton.config.CryptoConfig
 import com.digitalasset.canton.config.RequireTypes.{NonNegativeInt, PositiveInt}
 import com.digitalasset.canton.console.{
   ConsoleEnvironment,
@@ -71,7 +72,7 @@ private[lsu] trait LsuBase
         // Retry more frequently so that eventually blocks don't need to wait for too long
         .replace(config.NonNegativeFiniteDuration.ofSeconds(2))
     ),
-  ) ++ ConfigTransforms.enableAlphaVersionSupport
+  ) ++ ConfigTransforms.enableDevVersionSupport
     ++ ConfigTransforms.setTopologyTransactionRegistrationTimeout(
       // As we advance the clock quite a bit, we need to bump this parameter to avoid sequencing timeouts.
       config.NonNegativeFiniteDuration.ofHours(1)
@@ -398,7 +399,8 @@ object LsuBase {
       overridePsid: Option[PhysicalSynchronizerId] = None,
   ) {
     val newStaticSynchronizerParameters: StaticSynchronizerParameters =
-      StaticSynchronizerParameters.defaultsWithoutKMS(
+      StaticSynchronizerParameters.defaults(
+        CryptoConfig(),
         newPV,
         newSerial,
         topologyChangeDelay = config.NonNegativeFiniteDuration.Zero,

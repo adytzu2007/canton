@@ -17,7 +17,6 @@ import com.daml.tracing.{Event, SpanAttribute, Spans}
 import com.digitalasset.base.error.DamlErrorWithDefiniteAnswer
 import com.digitalasset.base.error.utils.DecodedCantonError
 import com.digitalasset.canton.concurrent.DirectExecutionContext
-import com.digitalasset.canton.config
 import com.digitalasset.canton.config.CantonRequireTypes.String185
 import com.digitalasset.canton.config.NonNegativeFiniteDuration
 import com.digitalasset.canton.data.Offset
@@ -33,7 +32,10 @@ import com.digitalasset.canton.ledger.api.{
 import com.digitalasset.canton.ledger.error.LedgerApiErrors.InterfaceViewUpgradeFailureWrapper
 import com.digitalasset.canton.ledger.error.groups.RequestValidationErrors
 import com.digitalasset.canton.ledger.error.{CommonErrors, LedgerApiErrors}
+import com.digitalasset.canton.ledger.participant.state.InternalIndexService
 import com.digitalasset.canton.ledger.participant.state.index.*
+import com.digitalasset.canton.ledger.participant.state.index.IndexUpdateService.UpdateResponse
+import com.digitalasset.canton.ledger.participant.state.index.IndexUpdateService.UpdateResponse.ProtoUpdate
 import com.digitalasset.canton.logging.LoggingContextWithTrace.implicitExtractTraceContext
 import com.digitalasset.canton.logging.{
   ErrorLoggingContext,
@@ -49,8 +51,9 @@ import com.digitalasset.canton.pekkostreams.dispatcher.SubSource.RangeSource
 import com.digitalasset.canton.platform.config.UpdateServiceConfig
 import com.digitalasset.canton.platform.index.IndexServiceImpl.*
 import com.digitalasset.canton.platform.index.IndexServiceOwner.GetPackagePreferenceForViewsUpgrading
+import com.digitalasset.canton.platform.store.backend.LedgerEnd
 import com.digitalasset.canton.platform.store.backend.common.UpdatePointwiseQueries.LookupKey
-import com.digitalasset.canton.platform.store.cache.OffsetCheckpoint
+import com.digitalasset.canton.platform.store.cache.{LedgerEndCache, OffsetCheckpoint}
 import com.digitalasset.canton.platform.store.dao.{
   EventProjectionProperties,
   LedgerDaoCommandCompletionsReader,
@@ -66,8 +69,11 @@ import com.digitalasset.canton.platform.{
   TemplatePartiesFilter,
   *,
 }
+import com.digitalasset.canton.protocol.LfContractId
 import com.digitalasset.canton.store.packagemeta.PackageMetadata
 import com.digitalasset.canton.store.packagemeta.PackageMetadata.PackageResolution
+import com.digitalasset.canton.topology.SynchronizerId
+import com.digitalasset.canton.{ReassignmentCounter, config}
 import com.digitalasset.daml.lf.data.Ref
 import com.digitalasset.daml.lf.data.Ref.{FullIdentifier, Identifier, NameTypeConRef, PackageId}
 import com.google.rpc.Status
@@ -85,6 +91,7 @@ private[index] class IndexServiceImpl(
     participantId: Ref.ParticipantId,
     ledgerDao: LedgerReadDao,
     updatesReader: LedgerDaoUpdateReader,
+    acsChangesReader: AcsChangesReader,
     commandCompletionsReader: LedgerDaoCommandCompletionsReader,
     contractStore: ContractStore,
     pruneBuffers: PruneBuffers,
@@ -97,6 +104,7 @@ private[index] class IndexServiceImpl(
     override protected val loggerFactory: NamedLoggerFactory,
     materializer: Materializer,
     executionContext: ExecutionContext,
+    ledgerEndCache: LedgerEndCache,
     updateServiceConfig: UpdateServiceConfig,
 ) extends IndexService
     with NamedLogging {
@@ -121,7 +129,7 @@ private[index] class IndexServiceImpl(
       updateFormat: UpdateFormat,
       descendingOrder: Boolean,
       skipPruningChecks: Boolean,
-  )(implicit loggingContext: LoggingContextWithTrace): Source[GetUpdatesResponse, NotUsed] = {
+  )(implicit loggingContext: LoggingContextWithTrace): Source[UpdateResponse, NotUsed] = {
     val interfaceViewPackageUpgrade = createViewUpgradeMemoized
     val contextualizedErrorLogger = ErrorLoggingContext(logger, loggingContext)
     val isTailingStream = endInclusive.isEmpty
@@ -148,17 +156,34 @@ private[index] class IndexServiceImpl(
                   interfaceViewPackageUpgrade,
                 )
               (startInclusive, endInclusive) =>
-                Source(memoInternalUpdateFormat().toList)
-                  .flatMapConcat { internalUpdateFormat =>
-                    updatesReader
-                      .getUpdates(
+                val baseSource =
+                  Source(memoInternalUpdateFormat().toList)
+                    .flatMapConcat { internalUpdateFormat =>
+                      updatesReader
+                        .getUpdates(
+                          startInclusive = startInclusive,
+                          endInclusive = endInclusive,
+                          internalUpdateFormat = internalUpdateFormat,
+                          descendingOrder = descendingOrder,
+                          skipPruningChecks = skipPruningChecks,
+                        )
+                    }
+
+                val source = updateFormat.includeAcsChanges match {
+                  case None => baseSource
+                  case Some(synchronizerId) =>
+                    baseSource.via(
+                      acsChangesReader.withAcsChanges(
+                        synchronizerId = synchronizerId,
                         startInclusive = startInclusive,
                         endInclusive = endInclusive,
-                        internalUpdateFormat = internalUpdateFormat,
                         descendingOrder = descendingOrder,
                         skipPruningChecks = skipPruningChecks,
                       )
-                  }
+                    )
+                }
+
+                source
                   .via(
                     rangeDecorator(
                       startInclusive,
@@ -179,16 +204,62 @@ private[index] class IndexServiceImpl(
           )
           .mapError(shutdownError)
           .buffered(metrics.index.updatesBufferSize, LedgerApiStreamsBufferSize)
-      }.wireTap(
-        _.update match {
-          case GetUpdatesResponse.Update.Transaction(transaction) =>
-            Spans.addEventToCurrentSpan(
-              Event(transaction.commandId, TraceIdentifiers.fromTransaction(transaction))
-            )
-          case _ => ()
-        }
-      )
+      }.wireTap {
+        case ProtoUpdate(protoUpdate) =>
+          protoUpdate.update match {
+            case GetUpdatesResponse.Update.Transaction(transaction) =>
+              Spans.addEventToCurrentSpan(
+                Event(transaction.commandId, TraceIdentifiers.fromTransaction(transaction))
+              )
+            case _ => ()
+          }
+        case _ => ()
+      }
     }(contextualizedErrorLogger)
+  }
+
+  override def acs(
+      synchronizerId: SynchronizerId,
+      activeAt: Offset,
+      stakeholders1: Set[Party],
+      stakeholders2: Set[Party],
+  )(implicit
+      loggingContext: LoggingContextWithTrace
+  ): Source[InternalIndexService.ActiveContract, NotUsed] = {
+    val eventFormat =
+      EventFormat(
+        filtersByParty =
+          stakeholders1.view.map(_ -> CumulativeFilter.templateWildcardFilter()).toMap,
+        filtersForAnyParty =
+          Option.when(stakeholders1.isEmpty)(CumulativeFilter.templateWildcardFilter()),
+        verbose = false,
+      )
+    val synchronizerIdString = synchronizerId.toProtoPrimitive
+
+    getActiveContracts(
+      eventFormat = eventFormat,
+      activeAt = Some(activeAt),
+      rangeInfo = AcsRangeInfo.empty,
+    )
+      .mapConcat(_.contractEntry.activeContract.toList)
+      .filter(_.synchronizerId == synchronizerIdString)
+      .mapConcat { activeContract =>
+        activeContract.createdEvent.toList.flatMap { createdEvent =>
+          val stakeholders =
+            (createdEvent.signatories.view ++ createdEvent.observers.view)
+              .map(Party.assertFromString)
+              .toSet
+          Option
+            .when(stakeholders2.isEmpty || stakeholders.exists(stakeholders2))(
+              InternalIndexService.ActiveContract(
+                contractId = LfContractId.assertFromString(createdEvent.contractId),
+                stakeholders = stakeholders,
+                reassignmentCounter = ReassignmentCounter(activeContract.reassignmentCounter),
+              )
+            )
+            .toList
+        }
+      }
   }
 
   //  this flow adds checkpoint messages if the condition is met in the following way:
@@ -230,7 +301,7 @@ private[index] class IndexServiceImpl(
 
   override def getCompletions(
       startExclusive: Option[Offset],
-      userId: Ref.UserId,
+      userId: Option[Ref.UserId],
       parties: Set[Ref.Party],
   )(implicit loggingContext: LoggingContextWithTrace): Source[CompletionStreamResponse, NotUsed] =
     Source
@@ -282,7 +353,7 @@ private[index] class IndexServiceImpl(
       for {
         _ <- checkUnknownIdentifiers(eventFormat, currentPackageMetadata).left
           .map(_.asGrpcError)
-        endOffset = ledgerEnd()
+        endOffset = currentLedgerEnd().map(_.lastOffset)
         _ <- validatedAcsActiveAtOffset(
           activeAt = activeAt,
           ledgerEnd = endOffset,
@@ -422,10 +493,7 @@ private[index] class IndexServiceImpl(
 
   override def isPruningInProgress: Boolean = ledgerDao.isPruningInProgress
 
-  override def currentLedgerEnd(): Future[Option[Offset]] =
-    Future.successful(ledgerEnd())
-
-  private def ledgerEnd(): Option[Offset] = dispatcher().getHead()
+  override def currentLedgerEnd(): Option[LedgerEnd] = ledgerEndCache()
 
   private def between[A](
       startExclusive: Option[Offset],
@@ -495,7 +563,7 @@ private[index] class IndexServiceImpl(
 
     implicit val ec: ExecutionContext = executionContext
 
-    val ledgerEndBeforeFetch = ledgerEnd()
+    val ledgerEndBeforeFetch = currentLedgerEnd().map(_.lastOffset)
     for {
       calculatedBeginExclusive <- getUpdatesPageRequest.continueStreamFromIncl
         .map(_.decrement)
@@ -540,7 +608,7 @@ private[index] class IndexServiceImpl(
     implicit val ec: ExecutionContext = executionContext
     for {
       pruningOffsetBeforeFetch <- ledgerDao.indexDbPrunedUpTo
-      ledgerEndBeforeFetch = ledgerEnd()
+      ledgerEndBeforeFetch = currentLedgerEnd().map(_.lastOffset)
       calculatedBeginExclusive: Option[Offset] = getUpdatesPageRequest.startExclusive.getOrElse(
         pruningOffsetBeforeFetch
       )
@@ -616,6 +684,7 @@ private[index] class IndexServiceImpl(
         descendingOrder = getUpdatesPageRequest.descendingOrder,
         skipPruningChecks = skipPruningChecks,
       ).take(limit.toLong)
+        .collect { case ProtoUpdate(response) => response }
         .runWith(Sink.seq)(materializer)
         .map(_.flatMap(getUpdatesResponseToGetUpdateResponse))
     }
@@ -931,7 +1000,8 @@ object IndexServiceImpl {
       if (
         internalTransactionFormat.isEmpty &&
         reassignmentsInternalEventFormat.isEmpty &&
-        topologyEvents.isEmpty
+        topologyEvents.isEmpty &&
+        updateFormat.includeAcsCommitments.isEmpty
       )
         None
       else
@@ -940,6 +1010,7 @@ object IndexServiceImpl {
             includeTransactions = internalTransactionFormat,
             includeReassignments = reassignmentsInternalEventFormat,
             includeTopologyEvents = topologyEvents,
+            includeAcsCommitments = updateFormat.includeAcsCommitments,
           )
         )
   }
@@ -1202,8 +1273,10 @@ object IndexServiceImpl {
 
   private def updatesResponse(
       offsetCheckpoint: OffsetCheckpoint
-  ): GetUpdatesResponse =
-    GetUpdatesResponse.defaultInstance.withOffsetCheckpoint(offsetCheckpoint.toApi)
+  ): UpdateResponse =
+    UpdateResponse.ProtoUpdate(
+      GetUpdatesResponse.defaultInstance.withOffsetCheckpoint(offsetCheckpoint.toApi)
+    )
 
   private def completionsResponse(
       offsetCheckpoint: OffsetCheckpoint

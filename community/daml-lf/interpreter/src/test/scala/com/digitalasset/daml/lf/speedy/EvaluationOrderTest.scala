@@ -4,6 +4,7 @@
 package com.digitalasset.daml.lf
 package speedy
 
+import com.digitalasset.canton.logging.SuppressingLogging
 import com.digitalasset.daml.lf.crypto.SValueHash
 import com.digitalasset.daml.lf.data.Ref.{ChoiceName, PackageId, PackageName, Party, TypeConId}
 import com.digitalasset.daml.lf.data.{FrontStack, ImmArray, Ref}
@@ -17,10 +18,10 @@ import com.digitalasset.daml.lf.speedy.SValue.*
 import com.digitalasset.daml.lf.testing.parser.Implicits.SyntaxHelper
 import com.digitalasset.daml.lf.transaction.test.TransactionBuilder
 import com.digitalasset.daml.lf.transaction.{
-  NextGenContractStateMachine as ContractStateMachine,
   FatContractInstance,
   GlobalKey,
   GlobalKeyWithMaintainers,
+  NextGenContractStateMachine as ContractStateMachine,
   SerializationVersion,
 }
 import com.digitalasset.daml.lf.value.Value
@@ -31,7 +32,6 @@ import org.scalatest.matchers.should.Matchers
 
 import scala.collection.immutable.ArraySeq
 import scala.util.{Failure, Success, Try}
-import com.digitalasset.canton.logging.SuppressingLogging
 
 class EvaluationOrderWithoutKeyTest_V2Dev
     extends EvaluationOrderTest(LanguageVersion.v2_dev, withKey = true)
@@ -53,22 +53,41 @@ object LogEntry {
 // Dummy checker that just logs calls
 class AuthorizationCheckerLogger(logger: RecordingMachineLogger) extends AuthorizationChecker {
 
-  override private[lf] def authorizeCreate(optLocation: Option[Ref.Location], templateId: TypeConId, signatories: Set[Party], maintainers: Option[Set[Party]])(auth: Authorize): List[FailedAuthorization] = {
+  override private[lf] def authorizeCreate(
+      optLocation: Option[Ref.Location],
+      templateId: TypeConId,
+      signatories: Set[Party],
+      maintainers: Option[Set[Party]],
+  )(auth: Authorize): List[FailedAuthorization] = {
     logger.llTrace("authorizes create")
     List.empty
   }
 
-  override private[lf] def authorizeFetch(optLocation: Option[Ref.Location], templateId: TypeConId, stakeholders: Set[Party])(auth: Authorize): List[FailedAuthorization] = {
+  override private[lf] def authorizeFetch(
+      optLocation: Option[Ref.Location],
+      templateId: TypeConId,
+      stakeholders: Set[Party],
+  )(auth: Authorize): List[FailedAuthorization] = {
     logger.llTrace("authorizes fetch")
     List.empty
   }
 
-  override private[lf] def authorizeLookupByKey(optLocation: Option[Ref.Location], templateId: TypeConId, maintainers: Set[Party])(auth: Authorize): List[FailedAuthorization] = {
+  override private[lf] def authorizeLookupByKey(
+      optLocation: Option[Ref.Location],
+      templateId: TypeConId,
+      maintainers: Set[Party],
+  )(auth: Authorize): List[FailedAuthorization] = {
     logger.llTrace("authorizes lookup-by-key")
     List.empty
   }
 
-  override private[lf] def authorizeExercise(optLocation: Option[Ref.Location], templateId: TypeConId, choiceId: ChoiceName, actingParties: Set[Party], choiceAuthorizers: Option[Set[Party]])(auth: Authorize): List[FailedAuthorization] = {
+  override private[lf] def authorizeExercise(
+      optLocation: Option[Ref.Location],
+      templateId: TypeConId,
+      choiceId: ChoiceName,
+      actingParties: Set[Party],
+      choiceAuthorizers: Option[Set[Party]],
+  )(auth: Authorize): List[FailedAuthorization] = {
     logger.llTrace("authorizes exercise")
     List.empty
   }
@@ -81,7 +100,7 @@ abstract class EvaluationOrderTest(languageVersion: LanguageVersion, withKey: Bo
     with SuppressingLogging {
 
   private val testPkg = new TestPkg(withKey, languageVersion)
-  import testPkg._
+  import testPkg.*
 
   private[this] val cId: Value.ContractId =
     Value.ContractId.V1(crypto.Hash.hashPrivateKey("test"))
@@ -153,14 +172,12 @@ abstract class EvaluationOrderTest(languageVersion: LanguageVersion, withKey: Bo
       observers = List(observer),
       contractKeyWithMaintainers = Option.when(withKey)(
         GlobalKeyWithMaintainers(
-          GlobalKey
-            .assertBuild(
-              templateId = template,
-              packageName = pkg.pkgName,
-              key = normalizedKeyValue,
-              keyHash =
-                SValueHash.assertHashContractKey(pkg.pkgName, template.qualifiedName, keySValue),
-            ),
+          GlobalKey(
+            templateId = template,
+            packageName = pkg.pkgName,
+            key = normalizedKeyValue,
+            hash = SValueHash.assertHashContractKey(pkg.pkgName, template.qualifiedName, keySValue),
+          ),
           Set(alice),
         )
       ),
@@ -186,11 +203,11 @@ abstract class EvaluationOrderTest(languageVersion: LanguageVersion, withKey: Bo
     observers = List(bob),
     contractKeyWithMaintainers = Option.when(withKey)(
       GlobalKeyWithMaintainers(
-        GlobalKey.assertBuild(
+        GlobalKey(
           templateId = Human,
           packageName = pkg.pkgName,
           key = normalizedKeyValue,
-          keyHash = SValueHash.assertHashContractKey(pkg.pkgName, Human.qualifiedName, keySValue),
+          hash = SValueHash.assertHashContractKey(pkg.pkgName, Human.qualifiedName, keySValue),
         ),
         Set(alice),
       )
@@ -207,22 +224,22 @@ abstract class EvaluationOrderTest(languageVersion: LanguageVersion, withKey: Bo
   private[this] val getIfaceContract = Map(iface_contract.contractId -> iface_contract)
 
   private[this] val getKeys = Map(
-    GlobalKey.assertBuild(
+    GlobalKey(
       templateId = T,
       packageName = pkg.pkgName,
       key = keyValue,
-      keyHash = SValueHash.assertHashContractKey(pkg.pkgName, T.qualifiedName, keySValue),
+      hash = SValueHash.assertHashContractKey(pkg.pkgName, T.qualifiedName, keySValue),
     ) -> Vector(cId)
   )
 
   private[this] val cIds = Vector(cId, cId2, cId3, cId4, cId5)
 
   private[this] def getKeysWithNContracts(n: Int) = Map(
-    GlobalKey.assertBuild(
+    GlobalKey(
       templateId = T,
       packageName = pkg.pkgName,
       key = keyValue,
-      keyHash = SValueHash.assertHashContractKey(pkg.pkgName, T.qualifiedName, keySValue),
+      hash = SValueHash.assertHashContractKey(pkg.pkgName, T.qualifiedName, keySValue),
     ) -> cIds.take(n)
   )
 
@@ -258,11 +275,11 @@ abstract class EvaluationOrderTest(languageVersion: LanguageVersion, withKey: Bo
         committers = parties,
         logger = recordingLogger,
         readAs = readAs,
-        authorizationChecker= new AuthorizationCheckerLogger(recordingLogger),
+        authorizationChecker = new AuthorizationCheckerLogger(recordingLogger),
         interpretationConfig = InterpretationConfig.Default.copy(
           contractStateMode =
             if (withKey) ContractStateMachine.Mode.NUCK
-            else ContractStateMachine.Mode.NoKey,
+            else ContractStateMachine.Mode.NoKey
         ),
         packageResolution = packageResolution,
       )
@@ -1773,7 +1790,13 @@ abstract class EvaluationOrderTest(languageVersion: LanguageVersion, withKey: Bo
             getKeys = mapKeys(getKeys, getContract),
           )
           inside(res) { case Success(Right(_)) =>
-            msgs shouldBe buildLog("starts test", "maintainers", "queries key", "authorizes fetch", "ends test")
+            msgs shouldBe buildLog(
+              "starts test",
+              "maintainers",
+              "queries key",
+              "authorizes fetch",
+              "ends test",
+            )
           }
         }
 
@@ -2155,12 +2178,11 @@ abstract class EvaluationOrderTest(languageVersion: LanguageVersion, withKey: Bo
             Map(c.contractId -> c)
           }
           val getKeys = Map(
-            GlobalKey.assertBuild(
+            GlobalKey(
               templateId = TExcept,
               packageName = pkg.pkgName,
               key = keyValue,
-              keyHash =
-                SValueHash.assertHashContractKey(pkg.pkgName, TExcept.qualifiedName, keySValue),
+              hash = SValueHash.assertHashContractKey(pkg.pkgName, TExcept.qualifiedName, keySValue),
             ) -> Vector(cId)
           )
 
@@ -2348,7 +2370,13 @@ abstract class EvaluationOrderTest(languageVersion: LanguageVersion, withKey: Bo
                 getKeys = PartialFunction.empty,
               )
               inside(res) { case Success(Right(_)) =>
-                msgs shouldBe buildLog("starts test", "maintainers", "authorizes lookup-by-key", "queries key", "ends test")
+                msgs shouldBe buildLog(
+                  "starts test",
+                  "maintainers",
+                  "authorizes lookup-by-key",
+                  "queries key",
+                  "ends test",
+                )
               }
             }
           }

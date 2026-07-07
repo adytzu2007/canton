@@ -6,8 +6,7 @@ package com.digitalasset.canton.participant.protocol.submission
 import cats.data.EitherT
 import cats.syntax.either.*
 import cats.syntax.functor.*
-import cats.syntax.parallel.*
-import com.daml.nonempty.{NonEmpty, NonEmptyUtil}
+import cats.syntax.traverse.*
 import com.digitalasset.canton.LfPartyId
 import com.digitalasset.canton.crypto.*
 import com.digitalasset.canton.crypto.signer.SyncCryptoSigner.SigningTimestampOverrides
@@ -30,6 +29,7 @@ import com.digitalasset.canton.topology.{ParticipantId, PhysicalSynchronizerId}
 import com.digitalasset.canton.tracing.TraceContext
 import com.digitalasset.canton.util.{MaxBytesToDecompress, MonadUtil}
 import com.digitalasset.canton.version.ProtocolVersion
+import com.digitalasset.nonempty.{NonEmpty, NonEmptyUtil}
 import com.google.common.annotations.VisibleForTesting
 
 import scala.concurrent.ExecutionContext
@@ -140,7 +140,7 @@ object EncryptedViewMessageFactory {
           )
       )
       signature <- viewTrees.head1.toBeSigned
-        .parTraverse(rootHash =>
+        .traverse(rootHash =>
           cryptoSnapshot
             .sign(rootHash.unwrap, SigningKeyUsage.ProtocolOnly, signingTimestampOverrides)
             .leftMap(err => FailedToSignViewMessage(err))
@@ -273,7 +273,7 @@ object EncryptedViewMessageFactory {
     for {
       sessionKeyRandomnessMapNE <- sessionKeyRandomnessMapNEResult
       signature <- viewTree.toBeSigned
-        .parTraverse(rootHash =>
+        .traverse(rootHash =>
           cryptoSnapshot
             .sign(rootHash.unwrap, SigningKeyUsage.ProtocolOnly, signingTimestampOverrides)
             .leftMap(err => FailedToSignViewMessage(err))

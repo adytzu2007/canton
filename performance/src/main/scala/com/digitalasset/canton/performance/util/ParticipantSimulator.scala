@@ -6,7 +6,6 @@ package com.digitalasset.canton.performance.util
 import cats.data.EitherT
 import cats.syntax.functor.*
 import com.daml.metrics.api.MetricsContext
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.admin.api.client.commands.{GrpcAdminCommand, TopologyAdminCommands}
 import com.digitalasset.canton.config.RequireTypes.{NonNegativeInt, PositiveInt}
 import com.digitalasset.canton.config.{NonNegativeDuration, ProcessingTimeout}
@@ -34,7 +33,7 @@ import com.digitalasset.canton.lifecycle.{
 import com.digitalasset.canton.logging.{NamedLoggerFactory, NamedLogging, NamedLoggingContext}
 import com.digitalasset.canton.protocol.StaticSynchronizerParameters
 import com.digitalasset.canton.protocol.messages.{
-  AcsCommitment,
+  LegacyAcsCommitment,
   SignedProtocolMessage,
   UnsignedProtocolMessage,
 }
@@ -110,6 +109,7 @@ import com.digitalasset.canton.util.{
 }
 import com.digitalasset.canton.version.ParticipantProtocolFeatureFlags
 import com.digitalasset.canton.{SynchronizerAlias, config as cfg}
+import com.digitalasset.nonempty.NonEmpty
 import org.scalatest.OptionValues
 import org.slf4j.event.Level
 
@@ -595,7 +595,7 @@ class ParticipantSimulator(
       sequencerSubscriptionFactory,
       subscriptionHandlerFactory,
       synchronizerMetrics.sequencerClient.connectionPool,
-      metricsContext = MetricsContext.Empty,
+      metricsContext = pool.metricsContext,
       env.environment.config.parameters.timeouts.processing,
       loggerFactoryForParticipant,
     )
@@ -641,8 +641,8 @@ class ParticipantSimulator(
           case message: UnsignedProtocolMessage => logger.debug(s"UNSIGNED MESSAGE $message")
           case SignedProtocolMessage(typedMessage, signatures) =>
             typedMessage.content match {
-              case AcsCommitment(psid, sender, counterParticipant, period, commitment) =>
-                val payload = AcsCommitment.create(
+              case LegacyAcsCommitment(psid, sender, counterParticipant, period, commitment) =>
+                val payload = LegacyAcsCommitment.create(
                   synchronizerId = this.psid,
                   sender = counterParticipant,
                   counterParticipant = sender,

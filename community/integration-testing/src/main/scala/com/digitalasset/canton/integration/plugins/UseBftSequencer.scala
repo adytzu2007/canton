@@ -73,6 +73,8 @@ final class UseBftSequencer(
     // Use a shorter empty block creation timeout by default to speed up tests that stop sequencing
     //  and use `GetTime` to await an effective time to be reached on the synchronizer.
     consensusEmptyBlockCreationTimeout: FiniteDuration = 250.millis,
+    // Use a longer topology warn timeout in tests to avoid flakes under concurrent CI load.
+    consensusNewEpochTopologyWarnTimeout: FiniteDuration = 10.seconds,
     sequencingParameters: Option[topology.SequencingParameters] = None,
     maxRequestsInBatch: Short = DefaultMaxRequestsInBatch,
     minRequestsInBatch: Short = DefaultMinRequestsInBatch,
@@ -127,6 +129,7 @@ final class UseBftSequencer(
                     leaderSelectionPolicyConfigForPv34 =
                       getLeaderSelectionPolicyConfigForPv34(sequencingParameters, bftOrdererConfig),
                     consensusEmptyBlockCreationTimeout = consensusEmptyBlockCreationTimeout,
+                    consensusNewEpochTopologyWarnTimeout = consensusNewEpochTopologyWarnTimeout,
                     maxRequestsInBatch = maxRequestsInBatch,
                     minRequestsInBatch = minRequestsInBatch,
                     maxBatchCreationInterval = maxBatchCreationInterval,
@@ -247,13 +250,21 @@ final class UseBftSequencer(
                 },
             )
           }
-          val blockSequencerConfig =
+          val blockSequencerConfig = {
+            // without this config overrides (which are applied before plugins) are not preserved
+            val existingBlockSequencerConfig =
+              config.sequencers.get(selfInstanceName).map(_.sequencer) match {
+                case Some(bft: SequencerConfig.BftSequencer) => bft.block
+                case Some(external: SequencerConfig.External) => external.block
+                case _ => BlockSequencerConfig()
+              }
             if (shouldBenchmarkBftSequencer)
-              BlockSequencerConfig(
+              existingBlockSequencerConfig.copy(
                 circuitBreaker = BlockSequencerConfig.CircuitBreakerConfig(enabled = false),
                 streamInstrumentation = BlockSequencerStreamInstrumentationConfig(isEnabled = true),
               )
-            else BlockSequencerConfig()
+            else existingBlockSequencerConfig
+          }
           selfInstanceName -> SequencerConfig.BftSequencer(
             block = blockSequencerConfig,
             config = BftBlockOrdererConfig(
@@ -262,6 +273,7 @@ final class UseBftSequencer(
                 BftBlockOrdererConfig(),
               ),
               consensusEmptyBlockCreationTimeout = consensusEmptyBlockCreationTimeout,
+              consensusNewEpochTopologyWarnTimeout = consensusNewEpochTopologyWarnTimeout,
               maxRequestsInBatch = maxRequestsInBatch,
               minRequestsInBatch = minRequestsInBatch,
               maxBatchCreationInterval = maxBatchCreationInterval,

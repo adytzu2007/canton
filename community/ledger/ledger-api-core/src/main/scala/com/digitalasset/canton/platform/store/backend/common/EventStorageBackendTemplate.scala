@@ -6,6 +6,7 @@ package com.digitalasset.canton.platform.store.backend.common
 import anorm.SqlParser.*
 import anorm.{Row, RowParser, SimpleSql, ~}
 import cats.syntax.all.*
+import com.digitalasset.canton.ReassignmentCounter
 import com.digitalasset.canton.data.{CantonTimestamp, Offset}
 import com.digitalasset.canton.discard.Implicits.DiscardOps
 import com.digitalasset.canton.ledger.participant.state.Update.TopologyTransactionEffective.AuthorizationEvent
@@ -34,6 +35,7 @@ import com.digitalasset.canton.platform.store.backend.{
   RowDef,
 }
 import com.digitalasset.canton.platform.store.cache.LedgerEndCache
+import com.digitalasset.canton.platform.store.dao.LedgerDaoUpdateReader.DeactivatedContractInfo
 import com.digitalasset.canton.platform.store.dao.PaginatingAsyncStream.IdPageQuery
 import com.digitalasset.canton.platform.store.interning.StringInterning
 import com.digitalasset.canton.platform.{ContractId, Party}
@@ -48,6 +50,7 @@ import com.digitalasset.daml.lf.data.Ref.{
   NameTypeConRefConverter,
 }
 import com.digitalasset.daml.lf.data.Time.Timestamp
+import com.google.protobuf.ByteString
 
 import java.sql.{Connection, PreparedStatement}
 import scala.util.Using
@@ -83,8 +86,8 @@ object EventStorageBackendTemplate {
         submitters(stringInterning).?,
       ).mapN(filteredCommandId(_, _, allQueryingPartiesO))
 
-    val externalTransactionHash: RowDef[Option[Array[Byte]]] =
-      column("external_transaction_hash", byteArray(_).?)
+    val transactionHash: RowDef[Option[ByteString]] =
+      column("external_transaction_hash", byteArray).?.map(_.map(ByteString.copyFrom(_)))
 
     def trafficCost(
         stringInterning: StringInterning,
@@ -224,7 +227,7 @@ object EventStorageBackendTemplate {
       (
         commonEventPropertiesParser(stringInterning),
         commonUpdatePropertiesParser(stringInterning, allQueryingPartiesO),
-        externalTransactionHash,
+        transactionHash,
       ).mapN(TransactionProperties.apply)
 
     def reassignmentPropertiesParser(
@@ -405,6 +408,32 @@ object EventStorageBackendTemplate {
         stringInterning: StringInterning
     ): RowDef[SynchronizerOffset] =
       synchronizerOffsetParser("event_offset", stringInterning)
+
+    val payload: RowDef[Array[Byte]] = column("payload", byteArray(_))
+
+    def acsCommitmentEventParser(
+        stringInterning: StringInterning
+    ): RowDef[RawAcsCommitment] =
+      (
+        eventOffset,
+        eventSequentialId,
+        updateIdDef,
+        synchronizerId(stringInterning).map(_.toProtoPrimitive),
+        recordTime,
+        payload,
+        traceContext,
+      ).mapN(
+        RawAcsCommitment.apply
+      )
+
+    def deactivatedContractInfoParser(
+        stringInterning: StringInterning
+    ): RowDef[DeactivatedContractInfo] =
+      (
+        contractIdDef,
+        column("stakeholders", parties(stringInterning)(_).map(_.toSet)),
+        reassignmentCounter.map(ReassignmentCounter(_)),
+      ).mapN(DeactivatedContractInfo.apply)
   }
 
   val EventSequentialIdFirstLast: RowParser[(Long, Long)] =
@@ -473,6 +502,31 @@ abstract class EventStorageBackendTemplate(
 
   override def eventReaderQueries: EventReaderQueries =
     new EventReaderQueries(stringInterning)
+
+  override def archiveDeactivations(transactionOffsets: Iterable[Offset])(
+      connection: Connection
+  ): Map[Offset, Vector[DeactivatedContractInfo]] =
+    if (transactionOffsets.isEmpty) Map.empty
+    else
+      // TODO(#33578) revisit this query when the handling of duplicates / invalid cases is finalized
+      SQL"""
+       SELECT
+         deactivate.event_offset AS event_offset,
+         deactivate.contract_id AS contract_id,
+         deactivate.stakeholders AS stakeholders,
+         activate.reassignment_counter AS reassignment_counter
+       FROM lapi_events_deactivate_contract deactivate
+       JOIN lapi_events_activate_contract activate
+         ON activate.event_sequential_id = deactivate.deactivated_event_sequential_id
+       WHERE
+         deactivate.event_offset ${queryStrategy.anyOf(transactionOffsets.map(_.unwrap))}"""
+        .asVectorOf(
+          (
+            RowDefs.eventOffset,
+            RowDefs.deactivatedContractInfoParser(stringInterning),
+          ).tupled.rowParser
+        )(connection)
+        .groupMap(_._1)(_._2)
 
   override def pruneEvents(
       previousPruneUpToInclusiveOffset: Option[Offset],
@@ -752,6 +806,15 @@ abstract class EventStorageBackendTemplate(
         WHERE
           event_offset <= $pruneUpToInclusiveOffset AND
           ${QueryStrategy.offsetIsGreater("event_offset", previousPruneUpToInclusiveOffset)}"""
+      }
+
+      // prune acs commitments table
+      pruneWithLogging("Pruning lapi_events_acs_commitments table") {
+        SQL"""
+        DELETE FROM lapi_events_acs_commitments
+        WHERE
+          event_sequential_id <= $pruningToInclusiveEventSeqId AND
+          event_sequential_id > $pruningFromExclusiveEventSeqId"""
       }
 
       logger.info("Truncate table for storing pruning candidates")
@@ -1358,6 +1421,27 @@ abstract class EventStorageBackendTemplate(
           """)(connection)
           .filter(offset => Option(offset) <= ledgerEndCache().map(_.lastOffset))
       )
+
+  override def fetchAcsCommitments(
+      eventSequentialIds: SequentialIdBatch,
+      synchronizerId: SynchronizerId,
+      descendingOrder: Boolean,
+  )(connection: Connection): Vector[EventStorageBackend.RawAcsCommitment] =
+    stringInterning.synchronizerId
+      .tryInternalize(synchronizerId)
+      .fold(Vector.empty[EventStorageBackend.RawAcsCommitment]) { synchronizerIdInterned =>
+        val ordering = if (descendingOrder) cSQL"DESC" else cSQL"ASC"
+        val query = (columns: CompositeSql) =>
+          SQL"""
+            SELECT $columns
+            FROM lapi_events_acs_commitments e
+            WHERE ${queryStrategy.inBatch("e.event_sequential_id", eventSequentialIds)}
+                  AND e.synchronizer_id = $synchronizerIdInterned
+            ORDER BY e.event_sequential_id $ordering
+            """
+            .withFetchSize(Some(fetchSize(eventSequentialIds)))
+        RowDefs.acsCommitmentEventParser(stringInterning).queryMultipleRows(query)(connection)
+      }
 
   private def fetchByEventSequentialIds(
       tableName: String,

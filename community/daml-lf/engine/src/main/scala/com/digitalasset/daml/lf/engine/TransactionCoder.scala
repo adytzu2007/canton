@@ -18,10 +18,10 @@ import com.digitalasset.daml.lf.transaction.{
   Node,
   NodeId,
   SerializationVersion,
+  TransactionOuterClass as proto,
   VersionedTransaction,
   ensuresNoUnknownFieldsThenDecode,
   sequence,
-  TransactionOuterClass as proto,
 }
 import com.digitalasset.daml.lf.value.{DecodeError, EncodeError, Value}
 import com.digitalasset.daml.lf.{crypto, data, value}
@@ -76,9 +76,10 @@ class TransactionCoder(allowNullCharacters: Boolean) {
     private[this] def encodeNodeId(id: NodeId): String = id.index.toString
 
     private[this] def decodeNodeId(s: String): Either[DecodeError, NodeId] =
-      scalaz.std.string
-        .parseInt(s)
-        .fold(_ => Left(DecodeError(s"cannot parse node Id $s")), idx => Right(NodeId(idx)))
+      s.toIntOption match {
+        case Some(idx) => Right(NodeId(idx))
+        case None => Left(DecodeError(s"cannot parse node Id $s"))
+      }
 
     private[this] def encodeValue(
         nodeVersion: SerializationVersion,
@@ -365,11 +366,10 @@ class TransactionCoder(allowNullCharacters: Boolean) {
           .fromBytes(data.Bytes.fromByteString(msg.getHash))
           .left
           .map(DecodeError(_))
-        gkey <- GlobalKey
-          .build(templateId, packageName, keyValue, hash)
-          .left
-          .map(hashErr => DecodeError(hashErr.msg))
-      } yield GlobalKeyWithMaintainers(gkey, maintainers)
+      } yield GlobalKeyWithMaintainers(
+        GlobalKey(templateId, packageName, keyValue, hash),
+        maintainers,
+      )
 
     // package private for test, do not use outside TransactionCoder
     private[this] def decodeValue(

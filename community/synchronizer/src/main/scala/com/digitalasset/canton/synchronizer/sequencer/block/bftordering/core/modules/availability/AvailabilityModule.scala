@@ -350,14 +350,17 @@ final class AvailabilityModule[E <: Env[E]](
 
       case LocalDissemination.RemoteBatchAcknowledgeVerified(batchId, from, signature) =>
         logger.debug(
-          s"$actingOnMessageType: $from sent valid ACK for batch $batchId, " +
+          s"$actingOnMessageType: $from sent valid ACK for batch $batchId " +
+            s"(long-term key ${signature.authorizingLongTermKey.unwrap}), " +
             "updating batches ready for ordering"
         )
         disseminationProtocolState.disseminationProgress.get(batchId).foreach { progress =>
           setProgress(
             actingOnMessageType,
             batchId,
-            progress.addAck(AvailabilityAck(from, signature)),
+            // The active topology could have changed while the signature was being verified, so we need to
+            //  review the progress to make sure we don't add stale ACKs
+            progress.addAck(AvailabilityAck(from, signature)).changeMembership(activeMembership),
           )
         }
         attemptSatisfyingProposalRequestIfNotWaitingForDelayedResponse(actingOnMessageType)
@@ -731,7 +734,7 @@ final class AvailabilityModule[E <: Env[E]](
             s"number of available batches = $numberOfAvailableBatches)"
         )
         attemptSatisfyingProposalRequest(
-          shortType(actingOnMessageType),
+          actingOnMessageType,
           notifyConsensusIfNoReadyBatches = true,
         )
     }
@@ -1482,7 +1485,7 @@ final class AvailabilityModule[E <: Env[E]](
       disseminationProtocolState.disseminationProgress.size
     if (atMost > 0) {
       logger.debug(s"$actingOnMessageType: requesting at most $atMost batches from local mempool")
-      dependencies.mempool.asyncSendNoTrace(Mempool.CreateLocalBatches(atMost.toShort))
+      dependencies.mempool.asyncSend(Mempool.CreateLocalBatches(atMost.toShort))
     }
   }
 

@@ -101,7 +101,7 @@ final class LsuRollForwardNoActivityIntegrationTest extends LsuBase with HasExec
           .replace(Some(upgradeTime2))
       ),
       ConfigTransforms.updateSequencerConfig("sequencer3")(setLsuSequencingBoundsOverride),
-    ) ++ ConfigTransforms.enableAlphaVersionSupport
+    ) ++ ConfigTransforms.enableDevVersionSupport
   }
 
   private var fixture1: Fixture = _
@@ -148,7 +148,6 @@ final class LsuRollForwardNoActivityIntegrationTest extends LsuBase with HasExec
   )(implicit env: TestConsoleEnvironment): SynchronizerIndex =
     p.underlying.value.sync.ledgerApiIndexer.asEval.value.ledgerApiStore.value
       .cleanSynchronizerIndex(env.daId.logical)
-      .futureValueUS
       .value
 
   "LSU should allow roll forward" should {

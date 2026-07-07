@@ -98,6 +98,9 @@ object RejectionGenerators {
         case LfInterpretationError.ContractNotFound(cid) =>
           ConsistencyErrors.ContractNotFound
             .Reject(renderedMessage, cid)
+        case LfInterpretationError.UnsupportedContractId(cid) =>
+          ConsistencyErrors.UnsupportedContractId
+            .Reject(renderedMessage, cid)
         case LfInterpretationError.ContractKeyNotFound(key) =>
           CommandExecutionErrors.Interpreter.LookupErrors.ContractKeyNotFound
             .Reject(renderedMessage, key)
@@ -197,9 +200,29 @@ object RejectionGenerators {
             ) =>
           CommandExecutionErrors.Interpreter.CryptoError.MalformedSignature
             .Reject(renderedMessage, error)
-        case LfInterpretationError.ExternalCall(_) =>
-          CommandExecutionErrors.Interpreter.GenericInterpretationError
-            .Error(renderedMessage)
+        case LfInterpretationError.ExternalCall(
+              error: LfInterpretationError.ExternalCall.PreparationFailed
+            ) =>
+          CommandExecutionErrors.Interpreter.ExternalCallError.PreparationFailed
+            .Reject(renderedMessage, error)
+        case LfInterpretationError.ExternalCall(
+              error @ LfInterpretationError.ExternalCall.ExecutionFailed(
+                _,
+                _,
+                LfInterpretationError.ExternalCall.ExecutionFailed.CallFailed(_),
+              )
+            ) =>
+          CommandExecutionErrors.Interpreter.ExternalCallError.ExecutionFailed
+            .Reject(renderedMessage, error)
+        case LfInterpretationError.ExternalCall(
+              error @ LfInterpretationError.ExternalCall.ExecutionFailed(
+                _,
+                _,
+                LfInterpretationError.ExternalCall.ExecutionFailed.InvalidOutput(_),
+              )
+            ) =>
+          CommandExecutionErrors.Interpreter.ExternalCallError.InvalidOutput
+            .Reject(renderedMessage, error)
         case LfInterpretationError.Dev(_, err) =>
           CommandExecutionErrors.Interpreter.InterpretationDevError
             .Reject(renderedMessage, err)

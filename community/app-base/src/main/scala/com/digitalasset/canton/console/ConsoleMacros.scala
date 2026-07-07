@@ -19,7 +19,6 @@ import com.daml.ledger.api.v2.value.{
   Value,
 }
 import com.daml.ledger.javaapi.data.{DisclosedContract, Identifier}
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.admin.api.client.commands.LedgerApiTypeWrappers.WrappedCreatedEvent
 import com.digitalasset.canton.admin.api.client.data
 import com.digitalasset.canton.admin.api.client.data.{
@@ -60,6 +59,7 @@ import com.digitalasset.canton.tracing.{NoTracing, TraceContext}
 import com.digitalasset.canton.util.BinaryFileUtil
 import com.digitalasset.canton.version.ProtocolVersion
 import com.digitalasset.canton.{SequencerAlias, SynchronizerAlias, config}
+import com.digitalasset.nonempty.NonEmpty
 import com.google.protobuf.ByteString
 import com.typesafe.scalalogging.LazyLogging
 import io.circe.Encoder
@@ -829,7 +829,7 @@ trait ConsoleMacros extends NamedLogging with NoTracing {
         synchronizerOwners = distinctSequencers,
         synchronizerThreshold = PositiveInt.tryCreate(distinctSequencers.length),
         staticSynchronizerParameters =
-          data.StaticSynchronizerParameters.defaultsWithoutKMS(ProtocolVersion.forSynchronizer),
+          data.StaticSynchronizerParameters.defaults(ProtocolVersion.forSynchronizer),
         mediatorThreshold = PositiveInt.tryCreate(distinctMediators.size),
       ).logical
     }
@@ -847,7 +847,8 @@ trait ConsoleMacros extends NamedLogging with NoTracing {
         mediators: Seq[MediatorReference],
         synchronizerOwners: Seq[InstanceReference],
         synchronizerThreshold: PositiveInt,
-        staticSynchronizerParameters: data.StaticSynchronizerParameters,
+        staticSynchronizerParameters: data.StaticSynchronizerParameters =
+          data.StaticSynchronizerParameters.defaults(ProtocolVersion.forSynchronizer),
         mediatorRequestAmplification: SubmissionRequestAmplification =
           SubmissionRequestAmplification.NoAmplification,
         mediatorThreshold: PositiveInt = PositiveInt.one,

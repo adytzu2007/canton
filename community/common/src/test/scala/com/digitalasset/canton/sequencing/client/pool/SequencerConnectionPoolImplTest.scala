@@ -5,7 +5,6 @@ package com.digitalasset.canton.sequencing.client.pool
 
 import com.daml.metrics.api.noop.NoOpMetricsFactory
 import com.daml.metrics.api.{HistogramInventory, MetricName, MetricsContext}
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.config.RequireTypes.{NonNegativeInt, PositiveInt}
 import com.digitalasset.canton.health.ComponentHealthState
 import com.digitalasset.canton.logging.{LogEntry, SuppressionRule}
@@ -16,6 +15,7 @@ import com.digitalasset.canton.time.NonNegativeFiniteDuration
 import com.digitalasset.canton.topology.SequencerId
 import com.digitalasset.canton.util.LoggerUtil
 import com.digitalasset.canton.{BaseTest, FailOnShutdown, HasExecutionContext, config}
+import com.digitalasset.nonempty.NonEmpty
 import org.scalatest.Assertion
 import org.scalatest.wordspec.AnyWordSpec
 import org.slf4j.event.Level.{INFO, WARN}
@@ -749,6 +749,9 @@ class SequencerConnectionPoolImplTest
         }
       }
 
+      // Closing the pool closes all the metrics
+      poolMetrics.connectionHealthMetrics shouldBe empty
+
       withConnectionPool(
         nbConnections = PositiveInt.three,
         trustThreshold = PositiveInt.two,
@@ -756,15 +759,6 @@ class SequencerConnectionPoolImplTest
         metrics = poolMetrics, // reuse the same metrics
         namePrefix = "second-config",
       ) { (pool, _, _, _) =>
-        // when creating a new pool for the same synchronizer, the same metrics are reused and
-        // the connections from the first connect are still in there.
-        // this means, disconnecting from a synchronizer keeps the metric in fatal state
-        poolMetrics.connectionHealthMetrics should not be empty
-        forAll(currentMetrics) { case (name, value) =>
-          name should startWith("first-config")
-          value shouldBe 0 // fatal
-        }
-
         pool.start().futureValueUS.value
 
         // the pool startup removes all previous (lingering) metrics and creates new ones
@@ -776,6 +770,51 @@ class SequencerConnectionPoolImplTest
           }
         }
       }
+    }
+
+    "clean up only the metrics associated to a pool" in {
+      val poolMetrics = new SequencerClientMetrics(
+        new SequencerClientHistograms(MetricName("test"))(new HistogramInventory()),
+        NoOpMetricsFactory,
+      )(MetricsContext.Empty).connectionPool
+
+      def currentMetricsPsids =
+        poolMetrics.connectionHealthMetrics.map { case (mc, _gauge) => mc.labels.get("psid") }.toSet
+      def currentMetricsSize = poolMetrics.connectionHealthMetrics.size
+
+      withConnectionPool(
+        nbConnections = PositiveInt.three,
+        trustThreshold = PositiveInt.three,
+        i => mkConnectionAttributes(synchronizerIndex = 1, sequencerIndex = i + 1),
+        metrics = poolMetrics, // reuse the same metrics
+        metricsContext = MetricsContext("psid" -> "psid1"),
+        namePrefix = "first-config",
+      ) { (pool1, _, _, _) =>
+        pool1.start().futureValueUS.value
+
+        currentMetricsSize shouldBe 3
+        currentMetricsPsids shouldBe Set(Some("psid1"))
+
+        withConnectionPool(
+          nbConnections = PositiveInt.two,
+          trustThreshold = PositiveInt.two,
+          i => mkConnectionAttributes(synchronizerIndex = 1, sequencerIndex = i + 1),
+          metrics = poolMetrics, // reuse the same metrics
+          metricsContext = MetricsContext("psid" -> "psid2"),
+          namePrefix = "second-config",
+        ) { (pool2, _, _, _) =>
+          pool2.start().futureValueUS.value
+
+          currentMetricsSize shouldBe 5
+          currentMetricsPsids shouldBe Set(Some("psid1"), Some("psid2"))
+        }
+
+        currentMetricsSize shouldBe 3
+        currentMetricsPsids shouldBe Set(Some("psid1"))
+      }
+
+      currentMetricsSize shouldBe 0
+      currentMetricsPsids shouldBe Set()
     }
   }
 

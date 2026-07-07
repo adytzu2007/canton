@@ -94,7 +94,6 @@ import com.digitalasset.canton.crypto.{Signature, SigningPublicKey}
 import com.digitalasset.canton.data.{CantonTimestamp, DeduplicationPeriod}
 import com.digitalasset.canton.discard.Implicits.DiscardOps
 import com.digitalasset.canton.grpc.OutputFileStreamObserver
-import com.digitalasset.canton.ledger.api.{IdentityProviderConfig, IdentityProviderId}
 import com.digitalasset.canton.ledger.client.services.admin.IdentityProviderConfigClient
 import com.digitalasset.canton.logging.NamedLogging
 import com.digitalasset.canton.networking.grpc.{
@@ -106,6 +105,7 @@ import com.digitalasset.canton.participant.admin.data.PartyReplicationStatus
 import com.digitalasset.canton.participant.ledger.api.client.JavaDecodeUtil
 import com.digitalasset.canton.platform.apiserver.execution.CommandStatus
 import com.digitalasset.canton.protocol.LfContractId
+import com.digitalasset.canton.tea.v1.{GetAccountResponse, UpdateAccountResponse}
 import com.digitalasset.canton.topology.transaction.ParticipantPermission
 import com.digitalasset.canton.topology.transaction.TopologyTransaction.GenericTopologyTransaction
 import com.digitalasset.canton.topology.{
@@ -116,9 +116,11 @@ import com.digitalasset.canton.topology.{
   SynchronizerId,
 }
 import com.digitalasset.canton.tracing.NoTracing
+import com.digitalasset.canton.user.{IdentityProviderConfig, IdentityProviderId}
 import com.digitalasset.canton.util.FutureUtil
 import com.digitalasset.canton.{LfPackageId, LfPackageName, LfPartyId, config}
 import com.digitalasset.daml.lf.data.Ref
+import com.google.protobuf.ByteString
 import com.google.protobuf.field_mask.FieldMask
 import io.grpc.stub.StreamObserver
 import io.grpc.{Context, StatusRuntimeException}
@@ -724,6 +726,25 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
             )
           )
         }
+
+      @Help.Summary("Get an update by its transaction hash")
+      @Help.Description(
+        """Get an update by its transaction hash. Returns None if the update is not (yet) known
+          |at the participant or all the events of the update are filtered due to the update format
+          |or if the update has been pruned via `pruning.prune`.
+          """
+      )
+      def update_by_hash(
+          hash: ByteString,
+          updateFormat: UpdateFormat,
+      ): Option[UpdateWrapper] =
+        consoleEnvironment.run {
+          ledgerApiCommand(
+            LedgerApiCommands.UpdateService.GetUpdateByHash(hash, updateFormat)(
+              consoleEnvironment.environment.executionContext
+            )
+          )
+        }
     }
 
     @Help.Summary("Interactive submission")
@@ -841,6 +862,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
           userId: String = userId,
           deduplicationPeriod: Option[DeduplicationPeriod] = None,
           minLedgerTimeAbs: Option[Instant] = None,
+          optTimeout: Option[config.NonNegativeDuration] = Some(timeouts.ledgerCommand),
       ): ExecuteAndWaitResponseProto =
         consoleEnvironment.run {
           ledgerApiCommand(
@@ -852,6 +874,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
               deduplicationPeriod = deduplicationPeriod,
               minLedgerTimeAbs = minLedgerTimeAbs,
               hashingSchemeVersion = hashingSchemeVersion,
+              optTimeout = optTimeout,
             )
           )
         }
@@ -878,6 +901,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
           minLedgerTimeAbs: Option[Instant] = None,
           includeCreatedEventBlob: Boolean = false,
           customEventFormat: Option[EventFormat] = None,
+          optTimeout: Option[config.NonNegativeDuration] = Some(timeouts.ledgerCommand),
       ): ApiTransaction =
         consoleEnvironment.run {
           ledgerApiCommand(
@@ -892,6 +916,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
               transactionShape = transactionShape,
               includeCreatedEventBlob = includeCreatedEventBlob,
               customEventFormat = customEventFormat,
+              optTimeout = optTimeout,
             )
           )
         }.getTransaction
@@ -2663,6 +2688,8 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
           |  submissions.
           |- executeAsAnyParty: Flag (default false) indicating if the user is allowed to operate
           |  interactive submissions as any party.
+          |- actAsAnyParty: Flag (default false) indicating if the user is allowed to act as any
+          |  party.
           """
       )
       def create(
@@ -2678,6 +2705,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
           readAsAnyParty: Boolean = false,
           executeAs: Set[PartyId] = Set(),
           executeAsAnyParty: Boolean = false,
+          actAsAnyParty: Boolean = false,
           primaryPartyAuthentication: Boolean = false,
       ): User = {
         val lapiUser = consoleEnvironment.run {
@@ -2695,6 +2723,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
               readAsAnyParty = readAsAnyParty,
               executeAs = executeAs.map(_.toLf),
               executeAsAnyParty = executeAsAnyParty,
+              actAsAnyParty = actAsAnyParty,
               primaryPartyAuthentication = primaryPartyAuthentication,
             )
           )
@@ -2896,6 +2925,8 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
           |  submissions.
           |- executeAsAnyParty: Flag (default false) indicating if the user is allowed to operate
           |  interactive submissions as any party.
+          |- actAsAnyParty: Flag (default false) indicating if the user is allowed to act as any
+          |  party.
           """
         )
         def grant(
@@ -2908,6 +2939,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
             readAsAnyParty: Boolean = false,
             executeAs: Set[PartyId] = Set(),
             executeAsAnyParty: Boolean = false,
+            actAsAnyParty: Boolean = false,
         ): UserRights =
           consoleEnvironment.run {
             ledgerApiCommand(
@@ -2921,6 +2953,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
                 identityProviderId = identityProviderId,
                 readAsAnyParty = readAsAnyParty,
                 executeAsAnyParty = executeAsAnyParty,
+                actAsAnyParty = actAsAnyParty,
               )
             ).flatMap(_ =>
               ledgerApiCommand(
@@ -2950,6 +2983,8 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
             |  submissions.
             |- executeAsAnyParty: Flag (default false) indicating if the user is allowed to operate
             |  interactive submissions as any party.
+            |- actAsAnyParty: Flag (default false) indicating if the user is allowed to act as any
+            |  party.
             """
         )
         def revoke(
@@ -2962,6 +2997,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
             readAsAnyParty: Boolean = false,
             executeAs: Set[PartyId] = Set(),
             executeAsAnyParty: Boolean = false,
+            actAsAnyParty: Boolean = false,
         ): UserRights =
           consoleEnvironment.run {
             ledgerApiCommand(
@@ -2975,6 +3011,7 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
                 identityProviderId = identityProviderId,
                 readAsAnyParty = readAsAnyParty,
                 executeAsAnyParty = executeAsAnyParty,
+                actAsAnyParty = actAsAnyParty,
               )
             ).flatMap(_ =>
               ledgerApiCommand(
@@ -3703,6 +3740,33 @@ trait BaseLedgerApiAdministration extends NoTracing with StreamingCommandHelper 
           ledger_api.event_query
             .by_contract_id(contractId, requestingParties, includeCreatedEventBlob)
             .pipe(GetEventsByContractIdResponse.toJavaProto)
+      }
+    }
+
+    @Help.Summary("Participant user traffic service")
+    @Help.Group("Traffic")
+    object traffic extends Helpful {
+      @Help.Summary("Get account details", FeatureFlag.Testing)
+      @Help.Description("Get the details for the specified account-id")
+      def get_account(accountId: String): GetAccountResponse =
+        consoleEnvironment.run {
+          ledgerApiCommand(LedgerApiCommands.Traffic.GetAccount(accountId))
+        }
+
+      @Help.Summary("Update details for the account-id", FeatureFlag.Testing)
+      @Help.Description(
+        """Update the account details (by adding the balance delta) for the specified account-id.
+          |If unset, the balance will not be updated
+          |subsequent balance updates with the same deduplicationId will be ignored"""
+      )
+      def update_account(
+          accountId: String,
+          balanceDelta: Option[Long],
+          deduplicationId: String = UUID.randomUUID().toString,
+      ): UpdateAccountResponse = consoleEnvironment.run {
+        ledgerApiCommand(
+          LedgerApiCommands.Traffic.UpdateAccount(accountId, balanceDelta, deduplicationId)
+        )
       }
     }
   }

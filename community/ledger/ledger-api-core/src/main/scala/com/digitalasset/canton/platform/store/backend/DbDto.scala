@@ -265,6 +265,7 @@ object DbDto {
       is_transaction: Boolean,
       trace_context: Array[Byte],
       traffic_cost: Long,
+      transaction_hash: Option[Array[Byte]] = None,
   ) extends DbDto {
     override def provideInternedStrings(builder: StringInterningBuilder): Unit = {
       builder.addUserId(user_id)
@@ -293,6 +294,7 @@ object DbDto {
       synchronizer_id: SynchronizerId,
       event_sequential_id_first: Long,
       event_sequential_id_last: Long,
+      transaction_hash: Option[Array[Byte]],
   ) extends DbDto {
     override def provideInternedStrings(builder: StringInterningBuilder): Unit =
       builder.addSynchronizerId(synchronizer_id)
@@ -301,6 +303,19 @@ object DbDto {
   final case class SequencerIndexMoved(synchronizerId: SynchronizerId) extends DbDto {
     override def provideInternedStrings(builder: StringInterningBuilder): Unit =
       builder.addSynchronizerId(synchronizerId)
+  }
+
+  final case class AcsCommitment(
+      event_sequential_id: Long,
+      event_offset: Long,
+      update_id: Array[Byte],
+      synchronizer_id: SynchronizerId,
+      record_time: Long,
+      payload: Array[Byte],
+      trace_context: Array[Byte],
+  ) extends DbDto {
+    override def provideInternedStrings(builder: StringInterningBuilder): Unit =
+      builder.addSynchronizerId(synchronizer_id)
   }
 
   def createDbDtos(

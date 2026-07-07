@@ -63,9 +63,10 @@ import com.digitalasset.canton.participant.pruning.{
   OpenCommitmentHelper,
 }
 import com.digitalasset.canton.protocol.messages.{
-  AcsCommitment,
-  CommitmentPeriod,
   CommitmentPeriodState,
+  Digest,
+  LegacyAcsCommitment,
+  LegacyCommitmentPeriod,
   SignedProtocolMessage,
 }
 import com.digitalasset.canton.protocol.{ContractInstance, LfContractId, LfVersionedTransaction}
@@ -73,7 +74,12 @@ import com.digitalasset.canton.scheduler.SafeToPruneCommitmentState
 import com.digitalasset.canton.sequencing.PossiblyIgnoredProtocolEvent
 import com.digitalasset.canton.serialization.ProtoConverter
 import com.digitalasset.canton.time.NonNegativeFiniteDuration
-import com.digitalasset.canton.topology.transaction.GrpcConnection
+import com.digitalasset.canton.topology.transaction.{
+  GrpcConnection,
+  SignedTopologyTransaction,
+  TopologyChangeOp,
+  TopologyMapping,
+}
 import com.digitalasset.canton.topology.{
   ParticipantId,
   PartyId,
@@ -263,10 +269,12 @@ private[console] object ParticipantCommands {
         runner: AdminCommandRunner,
         config: SynchronizerConnectionConfig,
         validation: SequencerConnectionValidation,
+        onboardingTransactions: Seq[SignedTopologyTransaction[TopologyChangeOp, TopologyMapping]] =
+          Seq.empty,
     ): ConsoleCommandResult[Unit] =
       runner.adminCommand(
         ParticipantAdminCommands.SynchronizerConnectivity
-          .ConnectSynchronizer(config.toInternal, validation.toInternal)
+          .ConnectSynchronizer(config.toInternal, validation.toInternal, onboardingTransactions)
       )
 
     def reconnect(
@@ -802,7 +810,7 @@ class LocalCommitmentsAdministrationGroup(
       start: Instant,
       end: Instant,
       counterParticipant: Option[ParticipantId] = None,
-  ): Iterable[SignedProtocolMessage[AcsCommitment]] =
+  ): Iterable[SignedProtocolMessage[LegacyAcsCommitment]] =
     access(node =>
       node.sync.stateInspection
         .findReceivedCommitments(
@@ -819,7 +827,7 @@ class LocalCommitmentsAdministrationGroup(
       start: Instant,
       end: Instant,
       counterParticipant: Option[ParticipantId] = None,
-  ): Iterable[(CommitmentPeriod, ParticipantId, AcsCommitment.HashedCommitmentType)] =
+  ): Iterable[(LegacyCommitmentPeriod, ParticipantId, Digest.HashedDigestType)] =
     access { node =>
       node.sync.stateInspection.findComputedCommitments(
         synchronizerAlias,
@@ -834,7 +842,7 @@ class LocalCommitmentsAdministrationGroup(
       start: Instant,
       end: Instant,
       counterParticipant: Option[ParticipantId] = None,
-  ): Iterable[(CommitmentPeriod, ParticipantId, CommitmentPeriodState)] =
+  ): Iterable[(LegacyCommitmentPeriod, ParticipantId, CommitmentPeriodState)] =
     access { node =>
       node.sync.stateInspection.outstandingCommitments(
         synchronizerAlias,
@@ -892,7 +900,7 @@ class CommitmentsAdministrationGroup(
       """
   )
   def open_commitment(
-      commitment: AcsCommitment.HashedCommitmentType,
+      commitment: Digest.HashedDigestType,
       physicalSynchronizerId: PhysicalSynchronizerId,
       timestamp: CantonTimestamp,
       counterParticipant: ParticipantId,
@@ -2269,6 +2277,11 @@ trait ParticipantAdministration extends FeatureFlagFilter {
         |Parameters:
         |- validation: Whether to validate the connectivity and ids of the given sequencers
         |  (default all)
+        |- onboardingTransactions: Optional onboarding topology transactions used for
+        |  onboarding. They should be a SynchronizerTrustCertificate, an OwnerToKeyMapping
+        |  and at least one NamespaceDelegation, each serialized with the synchronizer's
+        |  protocol version and signed. If empty, the participant uses the ones it
+        |  automatically generates and persists.
         """
     )
     def connect_by_config(
@@ -2277,6 +2290,8 @@ trait ParticipantAdministration extends FeatureFlagFilter {
         synchronize: Option[NonNegativeDuration] = Some(
           consoleEnvironment.commandTimeouts.unbounded
         ),
+        onboardingTransactions: Seq[SignedTopologyTransaction[TopologyChangeOp, TopologyMapping]] =
+          Seq.empty,
     ): Unit = {
       val current = this.config(config.synchronizerAlias)
 
@@ -2284,7 +2299,12 @@ trait ParticipantAdministration extends FeatureFlagFilter {
         // architecture-handbook-entry-begin: OnboardParticipantConnect
         // connect to the new synchronizer
         consoleEnvironment.run {
-          ParticipantCommands.synchronizers.connect(runner, config, validation)
+          ParticipantCommands.synchronizers.connect(
+            runner,
+            config,
+            validation,
+            onboardingTransactions,
+          )
         }
         // architecture-handbook-entry-end: OnboardParticipantConnect
       } else {

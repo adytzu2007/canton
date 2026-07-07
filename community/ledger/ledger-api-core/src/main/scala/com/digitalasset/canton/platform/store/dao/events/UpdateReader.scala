@@ -13,10 +13,11 @@ import com.daml.ledger.api.v2.reassignment.{
 import com.daml.ledger.api.v2.state_service.GetActiveContractsResponse
 import com.daml.ledger.api.v2.trace_context.TraceContext as DamlTraceContext
 import com.daml.ledger.api.v2.transaction.Transaction
-import com.daml.ledger.api.v2.update_service.{GetUpdateResponse, GetUpdatesResponse}
+import com.daml.ledger.api.v2.update_service.GetUpdateResponse
 import com.digitalasset.canton.data.Offset
 import com.digitalasset.canton.ledger.api.messages.state.AcsRangeInfo
 import com.digitalasset.canton.ledger.api.util.{LfEngineToApi, TimestampConversion}
+import com.digitalasset.canton.ledger.participant.state.index.IndexUpdateService.UpdateResponse
 import com.digitalasset.canton.logging.{ErrorLoggingContext, LoggingContextWithTrace}
 import com.digitalasset.canton.metrics.LedgerApiServerMetrics
 import com.digitalasset.canton.platform.store.LedgerApiContractStore
@@ -45,7 +46,6 @@ import com.digitalasset.canton.platform.store.dao.{
 }
 import com.digitalasset.canton.platform.{FatContract, InternalUpdateFormat, TemplatePartiesFilter}
 import com.digitalasset.canton.util.MonadUtil
-import com.google.protobuf.ByteString
 import io.opentelemetry.api.trace.Span
 import org.apache.pekko.stream.scaladsl.Source
 import org.apache.pekko.{Done, NotUsed}
@@ -86,7 +86,7 @@ private[dao] final class UpdateReader(
       skipPruningChecks: Boolean = false,
   )(implicit
       loggingContext: LoggingContextWithTrace
-  ): Source[(Offset, GetUpdatesResponse), NotUsed] = {
+  ): Source[(Offset, UpdateResponse), NotUsed] = {
     val futureSource =
       getEventSeqIdRange(startInclusive, endInclusive, skipPruningChecks = skipPruningChecks)
         .map(queryRange =>
@@ -419,8 +419,9 @@ private[dao] object UpdateReader {
             synchronizerId = first.synchronizerId,
             traceContext = Some(DamlTraceContext.parseFrom(first.traceContext)),
             recordTime = Some(TimestampConversion.fromLf(first.recordTime)),
-            externalTransactionHash = first.externalTransactionHash.map(ByteString.copyFrom),
+            externalTransactionHash = first.transactionHash,
             paidTrafficCost = first.trafficCost,
+            transactionHash = first.transactionHash,
           )
         }
       )

@@ -7,7 +7,6 @@ import cats.syntax.option.*
 import com.daml.jwt.JwtTimestampLeeway
 import com.daml.tls.TlsServerConfig
 import com.digitalasset.canton.config
-import com.digitalasset.canton.config.DeprecatedConfigUtils.DeprecatedFieldsFor
 import com.digitalasset.canton.config.RequireTypes.*
 import com.digitalasset.canton.config.{ReplicationConfig, *}
 import com.digitalasset.canton.http.{JsonApiConfig, JsonClientConfig}
@@ -28,6 +27,7 @@ import com.digitalasset.canton.platform.config.{
   PartyManagementServiceConfig,
   StateServiceConfig,
   TopologyAwarePackageSelectionConfig,
+  TrafficEnforcementConfig,
   UpdateServiceConfig,
   UserManagementServiceConfig,
 }
@@ -49,6 +49,7 @@ trait BaseParticipantConfig extends NodeConfig with Product with Serializable {
 
 final case class ParticipantProtocolConfig(
     minimumProtocolVersion: Option[ProtocolVersion],
+    override val devVersionSupport: Boolean,
     override val alphaVersionSupport: Boolean,
     override val betaVersionSupport: Boolean,
     override val dontWarnOnDeprecatedPV: Boolean,
@@ -95,6 +96,7 @@ final case class ParticipantNodeConfig(
     override val monitoring: NodeMonitoringConfig = NodeMonitoringConfig(),
     override val topology: TopologyConfig = TopologyConfig(),
     alphaDynamic: DeclarativeParticipantConfig = DeclarativeParticipantConfig(),
+    trafficEnforcement: TrafficEnforcementConfig = TrafficEnforcementConfig(),
 ) extends LocalNodeConfig
     with BaseParticipantConfig
     with ConfigDefaults[Option[DefaultPorts], ParticipantNodeConfig] {
@@ -128,33 +130,6 @@ final case class ParticipantNodeConfig(
       .modify(ReplicationConfig.withDefaultO(storage, _))
 }
 
-object ParticipantNodeConfig {
-  trait ParticipantNodeConfigDeprecationsImplicits {
-    implicit def deprecatedParticipantNodeConfig[X <: ParticipantNodeConfig]
-        : DeprecatedFieldsFor[X] = new DeprecatedFieldsFor[ParticipantNodeConfig] {
-      override def movedFields: List[DeprecatedConfigUtils.MovedConfigPath] = List(
-        DeprecatedConfigUtils.MovedConfigPath(
-          "http-ledger-api.server",
-          since = "3.4.0",
-          to = Seq("http-ledger-api"),
-        ),
-        DeprecatedConfigUtils.MovedConfigPath(
-          "features.profileDir",
-          since = "3.5.0",
-          to = Seq("parameters.engine"),
-        ),
-        DeprecatedConfigUtils.MovedConfigPath(
-          "features.snapshotDir",
-          since = "3.5.0",
-          to = Seq("parameters.engine"),
-        ),
-      )
-    }
-  }
-
-  object DeprecatedImplicits extends ParticipantNodeConfigDeprecationsImplicits
-}
-
 /** Participant features configuration */
 final case class ParticipantFeaturesConfig()
 
@@ -176,9 +151,11 @@ final case class RemoteParticipantConfig(
     ledgerApi: FullClientConfig,
     ledgerJsonApi: Option[JsonClientConfig] = None,
     token: Option[String] = None,
+    httpHealth: Option[HttpHealthServerConfig] = None,
 ) extends BaseParticipantConfig {
   override def clientAdminApi: ClientConfig = adminApi
   override def clientLedgerApi: ClientConfig = ledgerApi
+  override def httpHealthClientConfig: Option[HttpHealthServerConfig] = httpHealth
 }
 
 /** Canton configuration case class to pass-through configuration options to the ledger api server
@@ -321,9 +298,13 @@ object TestingTimeServiceConfig {
   * @param minimumProtocolVersion
   *   The minimum protocol version that this participant will speak when connecting to a
   *   synchronizer
-  * @param alphaVersionSupport
+  * @param devVersionSupport
   *   If set to true, will allow the participant to connect to a synchronizer with dev protocol
-  *   version and will turn on unsafe Daml LF versions.
+  *   version, it will turn on Daml LF dev version, and applies the dev database schema, which does
+  *   not provide data continuity and must not be used in production.
+  * @param alphaVersionSupport
+  *   If set to true, will allow the participant to connect to a synchronizer with alpha protocol
+  *   version.
   * @param dontWarnOnDeprecatedPV
   *   If true, then this participant will not emit a warning when connecting to a sequencer using a
   *   deprecated protocol version (such as 2.0.0).
@@ -402,6 +383,7 @@ final case class ParticipantNodeParameterConfig(
     minimumProtocolVersion: Option[ParticipantProtocolVersion] = Some(
       ParticipantProtocolVersion(ProtocolVersion.v34)
     ),
+    devVersionSupport: Boolean = false,
     alphaVersionSupport: Boolean = false,
     betaVersionSupport: Boolean = false,
     dontWarnOnDeprecatedPV: Boolean = false,
@@ -495,7 +477,7 @@ final case class LsuHandshake(
 /** Control incremental purges
   *
   * @param chunkSize
-  *   The amount of data that should be removed per purge iteration
+  *   The amount of data that should be removed per purge iteration.
   * @param cron
   *   A cron expression, defining when the purges can take place
   * @param maxDuration
@@ -506,6 +488,8 @@ final case class PurgeConfig(
     chunkSize: PositiveInt = PurgeConfig.DefaultChunkSize,
     cron: String = PurgeConfig.DefaultCron,
     maxDuration: config.PositiveFiniteDuration = PurgeConfig.DefaultMaxDuration,
+    purgeableStoresListValidity: config.NonNegativeFiniteDuration =
+      config.NonNegativeFiniteDuration.ofMinutes(1),
 )
 
 object PurgeConfig {
@@ -579,14 +563,16 @@ object JournalPruningConfig {
   * @param contractIdSeeding
   *   test-only way to override the contract-id seeding scheme. Must be Strong in production (and
   *   Strong is the default). Only configurable to reduce the amount of secure random numbers
-  *   consumed by tests and to avoid flaky timeouts during continuous integration.
+  *   consumed by tests and to avoid flaky timeouts during continuous integration. **This parameter
+  *   is deprecated and no longer used** (see `ledgerApiServerParametersConfigReader` in
+  *   CantonConfig.scala). The seeding is now always of the `Strong` type.
   * @param indexer
   *   parameters how the participant populates the index db used to serve the ledger api
   * @param tokenExpiryGracePeriodForStreams
   *   grace periods for streams that postpone termination beyond the JWT expiry
   */
 final case class LedgerApiServerParametersConfig(
-    contractIdSeeding: Seeding = Seeding.Strong,
+    contractIdSeeding: Seeding = Seeding.Strong, // TODO(i33818): Remove
     indexer: IndexerConfig = IndexerConfig(),
     tokenExpiryGracePeriodForStreams: Option[config.NonNegativeDuration] = None,
     contractLoader: ContractLoaderConfig = ContractLoaderConfig(),

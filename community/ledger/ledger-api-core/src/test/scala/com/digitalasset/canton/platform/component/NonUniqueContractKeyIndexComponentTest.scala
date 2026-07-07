@@ -3,7 +3,6 @@
 
 package com.digitalasset.canton.platform.component
 
-import com.daml.nonempty.NonEmpty
 import com.digitalasset.canton.data.CantonTimestamp
 import com.digitalasset.canton.ledger.participant.state.index.ContractKeyPage
 import com.digitalasset.canton.ledger.participant.state.{
@@ -26,6 +25,7 @@ import com.digitalasset.daml.lf.crypto
 import com.digitalasset.daml.lf.data.{ImmArray, Ref}
 import com.digitalasset.daml.lf.transaction.{GlobalKey, GlobalKeyWithMaintainers}
 import com.digitalasset.daml.lf.value.Value
+import com.digitalasset.nonempty.NonEmpty
 import org.scalatest.flatspec.AnyFlatSpec
 
 import scala.annotation.tailrec
@@ -37,21 +37,21 @@ class NonUniqueContractKeyIndexComponentTest extends AnyFlatSpec with IndexCompo
     val party = Ref.Party.assertFromString("party1")
 
     val key1 = GlobalKeyWithMaintainers(
-      globalKey = GlobalKey.assertBuild(
+      globalKey = GlobalKey(
         templateId = ExampleContractFactory.templateId,
         key = Value.ValueInt64(10),
         packageName = ExampleContractFactory.packageName,
-        keyHash = crypto.Hash.hashPrivateKey("1"),
+        hash = crypto.Hash.hashPrivateKey("1"),
       ),
       maintainers = Set(party),
     )
 
     val key2 = GlobalKeyWithMaintainers(
-      globalKey = GlobalKey.assertBuild(
+      globalKey = GlobalKey(
         templateId = ExampleContractFactory.templateId,
         key = Value.ValueInt64(20),
         packageName = ExampleContractFactory.packageName,
-        keyHash = crypto.Hash.hashPrivateKey("2"),
+        hash = crypto.Hash.hashPrivateKey("2"),
       ),
       maintainers = Set(party),
     )
